@@ -111,3 +111,95 @@ def test_grant_nonexistent_email_404():
     with TestClient(app) as c:
         A = _admin(c, "owner2@vettalume.test")
         assert c.post("/admin/admins", json={"email": "ghost@nowhere.test"}, headers=A).status_code == 404
+
+
+def _quiz_xlsx(rows):
+    import io
+
+    import openpyxl
+    wb = openpyxl.Workbook(); ws = wb.active
+    ws.append(["Question", "Option A", "Option B", "Option C", "Option D", "Answer", "Difficulty", "Solution"])
+    for r in rows:
+        ws.append(r)
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+    return buf
+
+
+def _fresh_concept(c, A, cid):
+    """Create a unique topic+concept under CAT/QA so tests don't pollute the seed graph."""
+    c.post("/admin/topics", json={"id": cid + "-t", "exam_code": "CAT", "section_key": "QA", "name": cid + " topic"}, headers=A)
+    c.post("/admin/concepts", json={"id": cid, "exam_code": "CAT", "section_key": "QA", "name": cid + " concept", "parent_id": cid + "-t"}, headers=A)
+
+
+def test_concept_content_videos_and_student_sees_them():
+    with TestClient(app) as c:
+        A = _admin(c, "content-admin@vettalume.test")
+        _fresh_concept(c, A, "z-cms-content")
+        put = c.put("/admin/concepts/z-cms-content/content",
+                    json={"body": "Average = sum / count.",
+                          "videos": [{"title": "Averages", "url": "https://youtu.be/x", "seconds": 120}]},
+                    headers=A)
+        assert put.status_code == 200 and put.json()["videos"] == 1
+        got = c.get("/admin/concepts/z-cms-content/content", headers=A).json()
+        assert got["body"].startswith("Average") and len(got["videos"]) == 1
+        # a student sees the content via the learner endpoint
+        L = {"Authorization": "Bearer " + c.post("/auth/dev-login", json={"email": "cv-stud@x.com"}).json()["access_token"]}
+        cd = c.get("/learn/concept/z-cms-content", headers=L).json()
+        assert cd["content"]["body"].startswith("Average") and len(cd["content"]["videos"]) == 1
+
+
+def test_subtopic_quiz_bulk_upload():
+    with TestClient(app) as c:
+        A = _admin(c, "quiz-admin@vettalume.test")
+        _fresh_concept(c, A, "z-cms-quiz")
+        buf = _quiz_xlsx([["Avg of 2,4,6?", "3", "4", "5", "6", "4", 0, "12/3=4"],
+                          ["Avg of 10,20?", "10", "15", "20", "25", "15", 1, "30/2"]])
+        up = c.post("/admin/concepts/z-cms-quiz/items/upload-xlsx",
+                    files={"file": ("quiz.xlsx", buf, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+                    headers=A)
+        assert up.status_code == 200 and up.json()["inserted"] == 2
+        items = c.get("/admin/items", params={"exam": "CAT", "concept": "z-cms-quiz"}, headers=A).json()
+        assert items["count"] == 2
+
+
+def test_mock_only_scope_excludes_from_practice():
+    with TestClient(app) as c:
+        A = _admin(c, "mock-admin@vettalume.test")
+        _fresh_concept(c, A, "z-cms-mock")
+        # one normal practice item + one mock_only item on the same concept
+        c.post("/admin/concepts/z-cms-mock/items/upload-xlsx",
+               files={"file": ("p.xlsx", _quiz_xlsx([["Practice Q?", "1", "2", "3", "4", "2", 0, "two"]]),
+                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}, headers=A)
+        up = c.post("/admin/concepts/z-cms-mock/items/upload-xlsx?scope=mock_only",
+                    files={"file": ("m.xlsx", _quiz_xlsx([["Mock-only Q?", "1", "2", "3", "4", "2", 0, "two"]]),
+                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}, headers=A)
+        assert up.status_code == 200 and up.json()["inserted"] == 1
+        mock_ids = [i["item_id"] for i in c.get("/admin/items", params={"exam": "CAT", "concept": "z-cms-mock"}, headers=A).json()["items"]
+                    if i["stem"].startswith("Mock-only")]
+        assert mock_ids
+        # practice must never serve a mock_only item
+        L = {"Authorization": "Bearer " + c.post("/auth/dev-login", json={"email": "mo-stud@x.com"}).json()["access_token"]}
+        served = set()
+        for _ in range(8):
+            nxt = c.get("/practice/next", params={"node_id": "z-cms-mock"}, headers=L).json()
+            if nxt.get("item_id"):
+                served.add(nxt["item_id"])
+                c.post("/practice/answer", json={"item_id": nxt["item_id"], "answer": "x"}, headers=L)
+        assert not (set(mock_ids) & served)
+
+
+def test_student_management_deregister_and_enroll():
+    with TestClient(app) as c:
+        A = _admin(c, "stu-admin@vettalume.test")
+        c.post("/auth/dev-login", json={"email": "managed@x.com"})   # learner self-enrols in CAT
+        students = c.get("/admin/students", params={"q": "managed@x.com"}, headers=A).json()
+        assert students["count"] == 1
+        sid = students["students"][0]["id"]
+        assert any(co["exam"] == "CAT" for co in students["students"][0]["courses"])
+        dr = c.post(f"/admin/students/{sid}/deregister", json={"exam_code": "CAT"}, headers=A)
+        assert dr.status_code == 200 and dr.json()["deregistered"] == "CAT"
+        assert not c.get(f"/admin/students/{sid}", headers=A).json()["courses"]
+        en = c.post(f"/admin/students/{sid}/enroll", json={"exam_code": "GMAT"}, headers=A)
+        assert en.status_code == 200
+        assert any(co["exam"] == "GMAT" for co in c.get(f"/admin/students/{sid}", headers=A).json()["courses"])
+        assert c.post(f"/admin/students/{sid}/deregister", json={"exam_code": "GRE"}, headers=A).status_code == 404

@@ -13,11 +13,12 @@ the things a spreadsheet is bad at (defining the graph, approving/QC, spot-editi
 from __future__ import annotations
 
 import io
+import uuid
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from .. import models
@@ -287,7 +288,7 @@ def delete_item(item_id: str, db: Session = Depends(get_db)) -> dict:
 
 
 @router.post("/items/upload-xlsx")
-async def upload_xlsx(file: UploadFile = File(...), db: Session = Depends(get_db)) -> dict:
+async def upload_xlsx(file: UploadFile = File(...), scope: str = "both", db: Session = Depends(get_db)) -> dict:
     """Admin-gated bulk upload — same question-bank workbook format as the authors' path: one sheet
     per exam (tab name = exam) OR a single sheet with an `Exam` column. Builds the graph from
     Topic/Subtopic/Prerequisites and ingests every question atomically; returns the import report."""
@@ -316,7 +317,7 @@ async def upload_xlsx(file: UploadFile = File(...), db: Session = Depends(get_db
             rows.append(row)
     if not rows:
         raise HTTPException(400, "no data rows found in any sheet")
-    return question_bank.import_question_bank(db, rows)
+    return question_bank.import_question_bank(db, rows, usage_scope=scope)
 
 
 # ───────────────────────── admin management ─────────────────────────
@@ -351,3 +352,206 @@ def revoke(account_id: str, admin: models.Account = Depends(require_admin),
     if not ok:
         raise HTTPException(404, "that account is not an admin")
     return {"ok": True, "revoked": account_id}
+
+
+# ═══════════════════════ learning content (concept theory + videos) ═══════════════════════
+class VideoIn(BaseModel):
+    title: str
+    url: str
+    seconds: Optional[int] = None
+
+
+class ContentIn(BaseModel):
+    body: Optional[str] = ""          # concept explanation (markdown/plain text)
+    videos: list[VideoIn] = []
+
+
+@router.get("/concepts/{node_id}/content")
+def get_concept_content(node_id: str, db: Session = Depends(get_db)) -> dict:
+    """Learning content for a subtopic: the concept explanation + its video links."""
+    n = db.get(models.KnowledgeNode, node_id)
+    if n is None or n.kind != "concept":
+        raise HTTPException(404, f"no concept {node_id!r}")
+    t = n.theory or {}
+    return {"node_id": node_id, "name": n.name,
+            "body": t.get("body", ""), "videos": t.get("videos", [])}
+
+
+@router.put("/concepts/{node_id}/content")
+def set_concept_content(node_id: str, body: ContentIn, db: Session = Depends(get_db)) -> dict:
+    n = db.get(models.KnowledgeNode, node_id)
+    if n is None or n.kind != "concept":
+        raise HTTPException(404, f"no concept {node_id!r}")
+    n.theory = {"body": body.body or "", "videos": [v.model_dump() for v in body.videos]}
+    db.commit()
+    return {"ok": True, "node_id": node_id, "videos": len(body.videos)}
+
+
+# ═══════════════════════ per-subtopic quiz: bulk upload (simple sheet) ═══════════════════════
+_QUIZ_HEADERS = {
+    "question id": "id", "id": "id",
+    "difficulty (-2 to 2)": "diff", "difficulty": "diff", "d": "diff",
+    "question text": "stem", "question": "stem", "stem": "stem",
+    "option a": "A", "option b": "B", "option c": "C", "option d": "D", "option e": "E",
+    "correct answer": "correct", "answer": "correct", "correct": "correct",
+    "solution / explanation": "sol", "solution": "sol", "explanation": "sol",
+    "expected time (sec)": "time", "time": "time",
+}
+
+
+def _parse_quiz_xlsx(data: bytes, exam: str, section_key: str, concept_node_id: str, scope: str):
+    from openpyxl import load_workbook
+
+    from ..schemas import ItemFormatIn, ItemIn, UsageScopeIn
+    try:
+        wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except Exception as e:
+        raise HTTPException(400, f"could not read workbook: {e}")
+    ws = wb.worksheets[0]
+    rit = ws.iter_rows(values_only=True)
+    header = next(rit, None)
+    if not header:
+        raise HTTPException(400, "empty sheet")
+    cols: dict[str, int] = {}
+    for i, h in enumerate(header):
+        key = _QUIZ_HEADERS.get(str(h).strip().lower()) if h is not None else None
+        if key:
+            cols[key] = i
+    if "stem" not in cols or "correct" not in cols:
+        raise HTTPException(400, "sheet needs at least a 'Question text' (or 'Question') and a "
+                                 "'Correct answer' (or 'Answer') column")
+    items, errors = [], []
+    seq = 0
+    for r in rit:
+        if r is None or all(c is None for c in r):
+            continue
+
+        def cell(k):
+            i = cols.get(k)
+            return r[i] if (i is not None and i < len(r)) else None
+
+        stem = cell("stem")
+        if stem is None or str(stem).strip() == "":
+            continue
+        seq += 1
+        opts = [str(cell(L)).strip() for L in "ABCDE" if cell(L) not in (None, "")]
+        diff = cell("diff")
+        try:
+            diff = max(-2, min(2, int(float(diff)))) if diff is not None else 0
+        except (TypeError, ValueError):
+            diff = 0
+        rid = str(cell("id")).strip() if cell("id") else f"{concept_node_id}-{uuid.uuid4().hex[:6]}"
+        try:
+            items.append(ItemIn(
+                item_id=rid, exam_code=exam, section_key=section_key, concept_node_id=concept_node_id,
+                difficulty_d=diff, format=ItemFormatIn.mcq, num_options=len(opts),
+                options=opts or None, correct_answer=str(cell("correct")).strip(),
+                stem=str(stem).strip(),
+                solution=(str(cell("sol")).strip() if cell("sol") else None),
+                usage_scope=UsageScopeIn(scope if scope in ("both", "mock_only", "practice_only") else "both"),
+            ))
+        except Exception as e:  # noqa: BLE001
+            errors.append({"row": seq, "item_id": rid, "error": str(e)})
+    return items, errors
+
+
+@router.post("/concepts/{node_id}/items/upload-xlsx")
+async def upload_concept_quiz(node_id: str, file: UploadFile = File(...),
+                              scope: str = "both", db: Session = Depends(get_db)) -> dict:
+    """Bulk-upload a subtopic's quiz from a simple .xlsx (Question / options / Answer / Difficulty).
+    Exam, section and concept come from the subtopic itself, so the sheet only carries questions.
+    scope: 'both' (practice + mocks, default), 'practice_only', or 'mock_only'."""
+    n = db.get(models.KnowledgeNode, node_id)
+    if n is None or n.kind != "concept":
+        raise HTTPException(404, f"no concept {node_id!r}")
+    sec = db.get(models.Section, n.section_id)
+    data = await file.read()
+    items, parse_errors = _parse_quiz_xlsx(data, n.exam_code, sec.key if sec else None, node_id, scope)
+    if not items:
+        raise HTTPException(400, "no questions found (need a 'Question text' and 'Correct answer' column)")
+    rep = ingestion.ingest_items(db, items)
+    out = rep.model_dump() if hasattr(rep, "model_dump") else dict(rep)
+    out["parse_errors"] = parse_errors
+    return out
+
+
+# ═══════════════════════ students: enrolment & management ═══════════════════════
+class EnrollIn(BaseModel):
+    exam_code: str
+
+
+@router.get("/students")
+def list_students(q: Optional[str] = None, limit: int = 100, db: Session = Depends(get_db)) -> dict:
+    query = select(models.Account)
+    if q:
+        query = query.where(func.lower(models.Account.email).like(f"%{q.lower()}%"))
+    accts = db.scalars(query.limit(limit)).all()
+    admin_ids = {a.account_id for a in db.scalars(select(models.AdminUser)).all()}
+    out = []
+    for a in accts:
+        ents = db.scalars(select(models.Entitlement).where(models.Entitlement.account_id == a.id)).all()
+        out.append({
+            "id": str(a.id), "email": a.email, "display_name": a.display_name,
+            "is_admin": a.id in admin_ids,
+            "courses": [{"exam": e.exam_code, "status": e.status} for e in ents],
+        })
+    return {"count": len(out), "students": out}
+
+
+@router.get("/students/{sid}")
+def student_detail(sid: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        a = db.get(models.Account, uuid.UUID(sid))
+    except (ValueError, TypeError):
+        a = None
+    if a is None:
+        raise HTTPException(404, "no such student")
+    ents = db.scalars(select(models.Entitlement).where(models.Entitlement.account_id == a.id)).all()
+    n_resp = db.scalar(select(func.count()).select_from(models.Response).where(
+        models.Response.learner_id == a.id)) or 0
+    return {
+        "id": str(a.id), "email": a.email, "display_name": a.display_name,
+        "courses": [{"exam": e.exam_code, "status": e.status} for e in ents],
+        "responses": int(n_resp),
+    }
+
+
+@router.post("/students/{sid}/deregister")
+def deregister_student(sid: str, body: EnrollIn, db: Session = Depends(get_db)) -> dict:
+    """Remove a student from a course (revokes their entitlement for that exam)."""
+    try:
+        a = db.get(models.Account, uuid.UUID(sid))
+    except (ValueError, TypeError):
+        a = None
+    if a is None:
+        raise HTTPException(404, "no such student")
+    ents = db.scalars(select(models.Entitlement).where(
+        models.Entitlement.account_id == a.id,
+        models.Entitlement.exam_code == body.exam_code)).all()
+    if not ents:
+        raise HTTPException(404, f"student is not enrolled in {body.exam_code}")
+    for e in ents:
+        db.delete(e)
+    db.commit()
+    return {"ok": True, "deregistered": body.exam_code}
+
+
+@router.post("/students/{sid}/enroll")
+def enroll_student(sid: str, body: EnrollIn, db: Session = Depends(get_db)) -> dict:
+    """Enrol a student into a course (grants/reactivates their entitlement)."""
+    try:
+        a = db.get(models.Account, uuid.UUID(sid))
+    except (ValueError, TypeError):
+        a = None
+    if a is None:
+        raise HTTPException(404, "no such student")
+    if db.get(models.Exam, body.exam_code) is None:
+        raise HTTPException(404, f"no exam {body.exam_code!r}")
+    ent = db.scalar(select(models.Entitlement).where(
+        models.Entitlement.account_id == a.id, models.Entitlement.exam_code == body.exam_code))
+    if ent:
+        ent.status = "active"
+    else:
+        db.add(models.Entitlement(account_id=a.id, exam_code=body.exam_code, status="active"))
+    db.commit()
+    return {"ok": True, "enrolled": body.exam_code}

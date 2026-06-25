@@ -54,7 +54,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title=settings.app_name, version="0.9.1 (Phase 8 — Postgres pooling + multi-worker serving; boot-race fix)", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.10.0 (Phase 9 — content CMS + student management)", lifespan=lifespan)
 
 # Dev-only: allow any origin so a separately-hosted frontend can call the API.
 app.add_middleware(

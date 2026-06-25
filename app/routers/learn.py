@@ -62,10 +62,12 @@ def concept_detail(node_id: str,
     if node is None or node.kind != models.NodeKind.concept.value:
         raise HTTPException(404, f"unknown concept '{node_id}'")
     cs = kg.concept_state(db, learner.id, node)
+    content = node.theory or {}
     return {
         "concept_id": cs.node_id, "name": cs.name, "mastery": round(cs.mastery, 4),
         "breakdown": {"P": round(cs.p, 4), "D": round(cs.d, 4), "M": round(cs.m, 4)},
         "edge": round(cs.edge, 2), "learning_progress": round(cs.learning_progress, 4),
         "attempts": cs.attempts, "learned": cs.learned, "mastered": cs.mastered,
         "due_for_review": cs.due_for_review,
+        "content": {"body": content.get("body", ""), "videos": content.get("videos", [])},
     }

@@ -89,6 +89,21 @@
   .toast.show{opacity:1}
   .toast.bad{border-color:#46282b;color:var(--bad)}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .hd-row{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+  .hd-row h3,.hd-row h4{margin:0}
+  .lst{display:flex;flex-direction:column;gap:7px}
+  .lrow{display:flex;align-items:center;gap:12px;padding:11px 13px;border:1px solid var(--line);border-radius:9px;cursor:pointer;background:var(--panel-2)}
+  .lrow:hover{border-color:var(--glacier)}
+  .lrow .ln,.vrow .ln{font-weight:600;color:var(--ink)}
+  .go{margin-left:auto;color:var(--glacier);font-size:12px;font-family:var(--f-mono)}
+  .panel{margin-top:16px;padding:15px;border:1px solid var(--line);border-radius:11px;background:var(--panel-2)}
+  .panel h4{margin:0 0 10px}
+  .panel>label{display:block;font-size:12px;color:var(--ink-3);margin:8px 0 3px}
+  .panel textarea{width:100%;box-sizing:border-box}
+  .vrow{display:flex;align-items:center;gap:10px;padding:9px 4px;border-bottom:1px solid var(--line)}
+  .vrow:last-child{border-bottom:none}
+  .crumb{font-size:13px;color:var(--ink-3);font-family:var(--f-mono)}
+  .crumb a{color:var(--glacier);text-decoration:none}
 </style>
 </head>
 <body>
@@ -118,8 +133,10 @@
   <main>
     <div class="tabs" id="tabs">
       <button class="tab" data-tab="syllabus" aria-selected="true">Syllabus</button>
+      <button class="tab" data-tab="learning" aria-selected="false">Learning content</button>
       <button class="tab" data-tab="items" aria-selected="false">Questions</button>
       <button class="tab" data-tab="upload" aria-selected="false">Bulk upload</button>
+      <button class="tab" data-tab="students" aria-selected="false">Students</button>
       <button class="tab" data-tab="admins" aria-selected="false">Admins</button>
     </div>
 
@@ -160,6 +177,7 @@
       <div class="card">
         <h3>Bulk question-bank upload</h3>
         <div class="sub">An <code>.xlsx</code> with one sheet per exam (tab named CAT / GMAT / GRE) or a single sheet with an <code>Exam</code> column. Builds the graph from Topic / Subtopic / Prerequisites and ingests every question atomically. This is the workhorse for volume.</div>
+        <div class="row" style="margin:4px 0 12px"><div class="field"><label>Usage scope</label><select id="upScope"><option value="both">both — practice + mocks</option><option value="practice_only">practice only</option><option value="mock_only">mock only (sectional / full mocks)</option></select></div></div>
         <div class="drop" id="drop">Drop your workbook here, or <span style="color:var(--glacier);text-decoration:underline">choose a file</span><input id="file" type="file" accept=".xlsx" class="hidden"></div>
         <div id="uploadMsg" style="margin-top:12px"></div>
         <pre class="report hidden" id="report"></pre>
@@ -179,6 +197,29 @@
       </div>
       <div class="card"><div id="adminsTable"></div></div>
     </section>
+    <!-- LEARNING CONTENT (nested CMS) -->
+    <section id="tab-learning" class="hidden">
+      <div class="card">
+        <div class="row" style="align-items:flex-end">
+          <div class="field"><label>Exam</label><select id="lrnExam"></select></div>
+          <div class="field"><label>Section</label><select id="lrnSection"></select></div>
+          <button class="btn" id="lrnReload">Reload</button>
+        </div>
+        <div class="crumb" id="lrnCrumb" style="margin-top:10px"></div>
+      </div>
+      <div class="card"><div id="lrnBody"><div class="muted">Pick an exam and section to manage chapters, subtopics, learning content and quizzes.</div></div></div>
+    </section>
+
+    <!-- STUDENTS -->
+    <section id="tab-students" class="hidden">
+      <div class="card">
+        <h3>Students</h3>
+        <div class="sub">Search by email, open a student to see their courses, and enrol or remove them from a course. Deregistering revokes the course entitlement.</div>
+        <div class="row"><div class="field"><label>Search by email (blank = list all)</label><input id="stuQ" placeholder="name@example.com"></div><button class="btn gold" id="stuSearch">Search</button></div>
+      </div>
+      <div class="card"><div id="stuBody"><div class="muted">Search to list students.</div></div></div>
+    </section>
+
   </main>
 </div>
 
@@ -235,8 +276,10 @@ document.getElementById("logoutBtn").onclick=()=>{API.token=null;API.me=null;loc
 /* ---------- tabs ---------- */
 document.getElementById("tabs").addEventListener("click",e=>{const t=e.target.closest(".tab");if(!t)return;
   document.querySelectorAll(".tab").forEach(x=>x.setAttribute("aria-selected",x===t?"true":"false"));
-  ["syllabus","items","upload","admins"].forEach(n=>document.getElementById("tab-"+n).classList.toggle("hidden",n!==t.dataset.tab));
+  ["syllabus","learning","items","upload","students","admins"].forEach(n=>document.getElementById("tab-"+n).classList.toggle("hidden",n!==t.dataset.tab));
   if(t.dataset.tab==="admins")loadAdmins();
+  if(t.dataset.tab==="learning"&&!LRN.exam)lrnInit();
+  if(t.dataset.tab==="students")stuList();
 });
 
 /* ---------- exams ---------- */
@@ -392,7 +435,7 @@ async function doUpload(file){
   const msg=document.getElementById("uploadMsg"),rep=document.getElementById("report");
   msg.innerHTML='<span class="muted mono">Uploading '+esc(file.name)+'…</span>';rep.classList.add("hidden");
   const fd=new FormData();fd.append("file",file);
-  try{const d=await req("POST","/admin/items/upload-xlsx",{form:fd});
+  try{const d=await req("POST","/admin/items/upload-xlsx?scope="+document.getElementById("upScope").value,{form:fd});
     msg.innerHTML='<span class="ok-msg">Imported.</span>';rep.textContent=JSON.stringify(d,null,2);rep.classList.remove("hidden");
     toast("Workbook imported");}
   catch(e){msg.innerHTML='<div class="err">'+esc(e.message)+'</div>';if(e.data){rep.textContent=JSON.stringify(e.data,null,2);rep.classList.remove("hidden");}}
@@ -423,6 +466,115 @@ document.getElementById("adminsTable").addEventListener("click",async e=>{
 
 /* boot */
 tryEnter();
+
+/* ========== LEARNING CONTENT (nested CMS) ========== */
+const LRN={exam:null,section:null,sections:[],nodes:[],chapter:null,subtopic:null};
+let LRN_VIDS=[];
+async function lrnInit(){await loadExamsInto(["lrnExam"]);await lrnLoad();}
+document.getElementById("lrnReload").onclick=()=>lrnLoad();
+document.getElementById("lrnExam").onchange=async()=>{LRN.chapter=null;LRN.subtopic=null;await lrnLoad();};
+document.getElementById("lrnSection").onchange=()=>{LRN.section=document.getElementById("lrnSection").value;LRN.chapter=null;LRN.subtopic=null;lrnRender();};
+async function lrnLoad(){
+  LRN.exam=document.getElementById("lrnExam").value;if(!LRN.exam)return;
+  let d;try{d=await get("/admin/syllabus",{exam:LRN.exam});}catch(e){document.getElementById("lrnBody").innerHTML='<div class="err">'+esc(e.message)+'</div>';return;}
+  LRN.sections=d.sections;LRN.nodes=d.nodes;
+  const sel=document.getElementById("lrnSection"),cur=LRN.section;
+  sel.innerHTML=d.sections.map(x=>`<option value="${esc(x.key)}">${esc(x.key)} — ${esc(x.name)}</option>`).join("");
+  if(cur&&d.sections.find(x=>x.key===cur))sel.value=cur; LRN.section=sel.value;
+  if(LRN.chapter)LRN.chapter=LRN.nodes.find(n=>n.id===LRN.chapter.id)||null;
+  if(LRN.subtopic)LRN.subtopic=LRN.nodes.find(n=>n.id===LRN.subtopic.id)||null;
+  lrnRender();
+}
+const lrnChapters=()=>LRN.nodes.filter(n=>n.kind==="topic"&&n.section===LRN.section);
+const lrnSubs=id=>LRN.nodes.filter(n=>n.kind==="concept"&&n.parent_id===id);
+function lrnCrumbRender(){let h=`<span>${esc(LRN.exam||"")}</span>`;
+  if(LRN.section)h+=` / <span>${esc(LRN.section)}</span>`;
+  if(LRN.chapter)h+=` / <a href="#" id="bcCh">${esc(LRN.chapter.name)}</a>`;
+  if(LRN.subtopic)h+=` / <span>${esc(LRN.subtopic.name)}</span>`;
+  document.getElementById("lrnCrumb").innerHTML=h;}
+function lrnRender(){lrnCrumbRender();const box=document.getElementById("lrnBody");
+  if(!LRN.section){box.innerHTML='<div class="muted">No section selected.</div>';return;}
+  if(LRN.subtopic){lrnRenderSub(box);return;}
+  if(LRN.chapter){lrnRenderSubList(box);return;}
+  lrnRenderChList(box);}
+function lrnRenderChList(box){const chs=lrnChapters();
+  let h=`<div class="hd-row"><h3>Chapters in ${esc(LRN.section)}</h3><div class="spacer"></div><button class="btn gold" id="lrnAddCh">+ Add chapter</button></div>`;
+  h+=chs.length?`<div class="lst">`+chs.map(t=>`<div class="lrow" data-och="${esc(t.id)}"><span class="ln">${esc(t.name)}</span><span class="cid">${esc(t.id)}</span><span class="count">${lrnSubs(t.id).length} subtopics</span><span class="go">open ›</span></div>`).join("")+`</div>`:`<div class="muted">No chapters yet. Add the first one.</div>`;
+  box.innerHTML=h;}
+function lrnRenderSubList(box){const subs=lrnSubs(LRN.chapter.id);
+  let h=`<div class="hd-row"><button class="btn sm" id="lrnBack">‹ chapters</button><h3 style="margin-left:6px">${esc(LRN.chapter.name)}</h3><div class="spacer"></div><button class="btn gold" id="lrnAddSub">+ Add subtopic</button></div>`;
+  h+=subs.length?`<div class="lst">`+subs.map(c=>`<div class="lrow" data-osub="${esc(c.id)}"><span class="ln">${esc(c.name)}</span><span class="cid">${esc(c.id)}</span><span class="count">${c.item_count} questions</span><span class="go">open ›</span></div>`).join("")+`</div>`:`<div class="muted">No subtopics yet. Add the first one.</div>`;
+  box.innerHTML=h;}
+async function lrnRenderSub(box){box.innerHTML='<div class="muted">Loading…</div>';
+  let content;try{content=await get("/admin/concepts/"+encodeURIComponent(LRN.subtopic.id)+"/content");}catch(e){content={body:"",videos:[]};}
+  let h=`<div class="hd-row"><button class="btn sm" id="lrnBackSub">‹ subtopics</button><h3 style="margin-left:6px">${esc(LRN.subtopic.name)}</h3><span class="cid">${esc(LRN.subtopic.id)}</span></div>`;
+  h+=`<div class="panel"><h4>Learning content</h4>
+    <label>Concept explanation</label><textarea id="lrnBody2" rows="6" placeholder="Explain the subtopic. Markdown is fine.">${esc(content.body||"")}</textarea>
+    <label>Videos (links — YouTube / Vimeo / hosted)</label><div id="lrnVidsBox"></div>
+    <div class="row" style="margin-top:6px"><input id="lrnVT" placeholder="Video title" style="flex:1"><input id="lrnVU" placeholder="https://youtu.be/…" style="flex:2"><input id="lrnVS" type="number" placeholder="sec" style="flex:0 0 76px"><button class="btn sm" id="lrnVAdd">+ add</button></div>
+    <div style="margin-top:12px"><button class="btn gold" id="lrnSave">Save content</button></div></div>`;
+  h+=`<div class="panel"><h4>Subtopic quiz — bulk upload</h4>
+    <div class="sub">A simple <code>.xlsx</code>: columns <b>Question</b>, <b>Option A–E</b>, <b>Answer</b>, <b>Difficulty</b> (−2..2), <b>Solution</b>. Exam, section and subtopic are taken from here automatically.</div>
+    <div class="row"><div class="field"><label>Scope</label><select id="lrnQScope"><option value="both">both (practice + mocks)</option><option value="practice_only">practice only</option><option value="mock_only">mock only</option></select></div></div>
+    <div class="drop" id="lrnQDrop" style="margin-top:6px">Drop quiz workbook here, or choose a file<input id="lrnQFile" type="file" accept=".xlsx" class="hidden"></div>
+    <div id="lrnQMsg" style="margin-top:8px"></div>
+    <div id="lrnQList" style="margin-top:12px"></div></div>`;
+  box.innerHTML=h; LRN_VIDS=(content.videos||[]).slice(); lrnVidsRender(); lrnQList();}
+function lrnVidsRender(){const b=document.getElementById("lrnVidsBox");if(!b)return;
+  b.innerHTML=LRN_VIDS.length?LRN_VIDS.map((v,i)=>`<div class="vrow"><span class="ln">${esc(v.title)}</span><a href="${esc(v.url)}" target="_blank" class="cid">${esc(v.url)}</a><span class="count">${v.seconds?v.seconds+"s":""}</span><div class="spacer"></div><button class="btn sm danger" data-dv="${i}">remove</button></div>`).join(""):'<div class="muted">No videos yet.</div>';}
+async function lrnQList(){const b=document.getElementById("lrnQList");if(!b)return;
+  try{const d=await get("/admin/items",{exam:LRN.exam,concept:LRN.subtopic.id});
+    b.innerHTML=d.items.length?`<div class="muted" style="margin-bottom:6px">${d.count} question(s)</div>`+d.items.map(it=>`<div class="vrow"><span class="ln">${esc(it.stem.slice(0,72))}</span><span class="count">d${it.difficulty_d}</span><span class="tag ${it.status==="approved"?"ok":it.status==="retired"?"retired":"draft"}">${esc(it.status)}</span></div>`).join(""):'<div class="muted">No questions in this subtopic yet.</div>';
+  }catch(e){b.innerHTML='<div class="err">'+esc(e.message)+'</div>';}}
+document.getElementById("tab-learning").addEventListener("click",async e=>{
+  const och=e.target.closest("[data-och]"),osub=e.target.closest("[data-osub]"),back=e.target.closest("#lrnBack"),
+        backS=e.target.closest("#lrnBackSub"),bcCh=e.target.closest("#bcCh"),addCh=e.target.closest("#lrnAddCh"),
+        addSub=e.target.closest("#lrnAddSub"),vAdd=e.target.closest("#lrnVAdd"),vDel=e.target.closest("[data-dv]"),
+        save=e.target.closest("#lrnSave"),qdrop=e.target.closest("#lrnQDrop");
+  try{
+    if(och){LRN.chapter=LRN.nodes.find(n=>n.id===och.dataset.och);LRN.subtopic=null;lrnRender();}
+    else if(osub){LRN.subtopic=LRN.nodes.find(n=>n.id===osub.dataset.osub);lrnRender();}
+    else if(back){LRN.chapter=null;LRN.subtopic=null;lrnRender();}
+    else if(backS||bcCh){e.preventDefault();LRN.subtopic=null;lrnRender();}
+    else if(addCh){openDlg("Add chapter to "+LRN.section,`<div class="grid2"><div><label>Chapter id</label><input id="f_id" placeholder="time-speed-distance"></div><div><label>Name</label><input id="f_name" placeholder="Time, Speed & Distance"></div></div>`,async()=>{await post("/admin/topics",{id:val("f_id"),exam_code:LRN.exam,section_key:LRN.section,name:val("f_name")});toast("Chapter added");await lrnLoad();});}
+    else if(addSub){openDlg("Add subtopic to "+LRN.chapter.name,`<div class="grid2"><div><label>Subtopic id</label><input id="f_id" placeholder="tsd-basics"></div><div><label>Name</label><input id="f_name" placeholder="TSD basics"></div></div>`,async()=>{await post("/admin/concepts",{id:val("f_id"),exam_code:LRN.exam,section_key:LRN.section,name:val("f_name"),parent_id:LRN.chapter.id});toast("Subtopic added");await lrnLoad();});}
+    else if(vAdd){const t=val("lrnVT"),u=val("lrnVU"),sc=document.getElementById("lrnVS").value;if(!t||!u){toast("title and url required",true);return;}LRN_VIDS.push({title:t,url:u,seconds:sc?parseInt(sc,10):null});lrnVidsRender();document.getElementById("lrnVT").value="";document.getElementById("lrnVU").value="";document.getElementById("lrnVS").value="";}
+    else if(vDel){LRN_VIDS.splice(parseInt(vDel.dataset.dv,10),1);lrnVidsRender();}
+    else if(save){await req("PUT","/admin/concepts/"+encodeURIComponent(LRN.subtopic.id)+"/content",{body:{body:document.getElementById("lrnBody2").value,videos:LRN_VIDS}});toast("Content saved");}
+    else if(qdrop){document.getElementById("lrnQFile").click();}
+  }catch(err){toast(err.message,true);}
+});
+document.getElementById("tab-learning").addEventListener("change",e=>{if(e.target&&e.target.id==="lrnQFile"&&e.target.files[0])lrnQUpload(e.target.files[0]);});
+async function lrnQUpload(file){const m=document.getElementById("lrnQMsg");m.innerHTML='<span class="muted">Uploading…</span>';
+  const fd=new FormData();fd.append("file",file);
+  try{const d=await req("POST","/admin/concepts/"+encodeURIComponent(LRN.subtopic.id)+"/items/upload-xlsx?scope="+document.getElementById("lrnQScope").value,{form:fd});
+    m.innerHTML='<span class="ok-msg">Added '+(d.inserted||0)+' question(s)'+(d.parse_errors&&d.parse_errors.length?' — '+d.parse_errors.length+' row error(s)':'')+'.</span>';lrnQList();
+  }catch(e){m.innerHTML='<div class="err">'+esc(e.message)+'</div>';}}
+
+/* ========== STUDENTS ========== */
+let STU={id:null};
+document.getElementById("stuSearch").onclick=stuList;
+document.getElementById("stuQ").addEventListener("keydown",e=>{if(e.key==="Enter")stuList();});
+async function stuList(){const box=document.getElementById("stuBody");box.innerHTML='<div class="muted">Loading…</div>';
+  let d;try{d=await get("/admin/students",{q:document.getElementById("stuQ").value.trim()});}catch(e){box.innerHTML='<div class="err">'+esc(e.message)+'</div>';return;}
+  box.innerHTML=d.students.length?`<div class="muted" style="margin-bottom:6px">${d.count} student(s)</div>`+d.students.map(x=>`<div class="lrow" data-stu="${esc(x.id)}"><span class="ln">${esc(x.email)}</span>${x.is_admin?'<span class="tag ok">admin</span>':""}<span class="count">${x.courses.map(c=>esc(c.exam)).join(", ")||"no courses"}</span><span class="go">manage ›</span></div>`).join(""):'<div class="muted">No students found.</div>';}
+document.getElementById("tab-students").addEventListener("click",async e=>{
+  const row=e.target.closest("[data-stu]");if(row){stuOpen(row.dataset.stu);return;}
+  const dr=e.target.closest("[data-dereg]"),en=e.target.closest("#stuEnroll"),back=e.target.closest("#stuBack");
+  try{
+    if(dr){if(confirm("Remove this student from "+dr.dataset.dereg+"?")){await post("/admin/students/"+encodeURIComponent(STU.id)+"/deregister",{exam_code:dr.dataset.dereg});toast("Removed from "+dr.dataset.dereg);stuOpen(STU.id);}}
+    else if(en){const ex=val("stuEnrollExam");if(ex){await post("/admin/students/"+encodeURIComponent(STU.id)+"/enroll",{exam_code:ex});toast("Enrolled in "+ex);stuOpen(STU.id);}}
+    else if(back){stuList();}
+  }catch(err){toast(err.message,true);}
+});
+async function stuOpen(id){STU.id=id;const box=document.getElementById("stuBody");box.innerHTML='<div class="muted">Loading…</div>';
+  let d;try{d=await get("/admin/students/"+encodeURIComponent(id));}catch(e){box.innerHTML='<div class="err">'+esc(e.message)+'</div>';return;}
+  let h=`<div class="hd-row"><button class="btn sm" id="stuBack">‹ all students</button><h3 style="margin-left:6px">${esc(d.email)}</h3></div>
+    <div class="muted">${esc(d.display_name||"")} · ${d.responses} questions answered</div>
+    <div class="panel"><h4>Courses</h4>`;
+  h+=d.courses.length?d.courses.map(c=>`<div class="vrow"><span class="ln">${esc(c.exam)}</span><span class="tag ${c.status==="active"?"ok":"draft"}">${esc(c.status)}</span><div class="spacer"></div><button class="btn sm danger" data-dereg="${esc(c.exam)}">deregister</button></div>`).join(""):'<div class="muted">Not enrolled in any course.</div>';
+  h+=`<div class="row" style="margin-top:12px"><div class="field"><label>Enrol in a course (exam code)</label><input id="stuEnrollExam" placeholder="CAT"></div><button class="btn gold" id="stuEnroll">Enrol</button></div></div>`;
+  box.innerHTML=h;}
 </script>
 </body>
 </html>

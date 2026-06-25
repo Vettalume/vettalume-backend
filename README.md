@@ -768,3 +768,20 @@ draft → approved → retired with `SERVE_ONLY_APPROVED` gating what learners s
   Phase 2 when calibration makes version binding load-bearing.
 - Enum-like fields stored as strings for portability; can become native PG enums later.
 - Auth is a stub; real auth is Phase 5.
+
+## Phase 9 — Content CMS + student management (v0.10.0)
+
+The admin portal (`/admin`) gained a full content-management surface that mirrors the learning structure, plus student administration.
+
+**Learning content (per subtopic).** Under the new **Learning content** tab an admin drills down exam → section → chapter (topic) → subtopic (concept). At the subtopic level they can:
+- write a **concept explanation** and attach **video links** (YouTube / Vimeo / hosted URLs with a title and optional duration). Stored on `KnowledgeNode.theory` as `{body, videos[]}` — no new table, no migration. Students read it via `GET /learn/concept/{id}` (the `content` field).
+- **bulk-upload a subtopic quiz** from a simple `.xlsx` (Question / Option A–E / Answer / Difficulty / Solution). Exam, section and concept are taken from the subtopic, so the sheet only carries questions. `POST /admin/concepts/{node_id}/items/upload-xlsx?scope=both|practice_only|mock_only`.
+
+**Mock uploads.** Mocks are assembled adaptively from the section item pool — there is no separate mock store. The Bulk-upload tab now has a **usage-scope selector**, so the same importer can tag questions `mock_only` (reserved for sectional / full mocks, never served in practice), `practice_only`, or `both`. Enforced in `state.eligible_items`.
+
+**Student management.** A new **Students** tab: search students, open one to see their courses and answered-question count, and **deregister** them from a course or **enrol** them. Backed by `GET /admin/students`, `GET /admin/students/{id}`, `POST /admin/students/{id}/deregister`, `POST /admin/students/{id}/enroll` (entitlement-driven).
+
+> Honest scope: video support is **links, not file hosting** (raw video files need object storage + a CDN — a separate epic). Entitlement **enforcement** is still off (`ENFORCE_ENTITLEMENTS=False`), so deregistering removes the enrolment record but does not yet block access. Unrestricted admin power over student data should grow an **audit log** and a **super-admin vs content-admin** split before production. Payments move to **Phase 10**.
+
+Interactive engine tools: `scripts/irt_mock.py` (adaptive IRT, watch θ tighten) and `scripts/mab_play.py` (Learning loop — the bandit picks each question; watch mastery, the MAPLE edge, and concept unlocks). `scripts/mab_drive.py` drives the MAB deterministically at a set accuracy.
+

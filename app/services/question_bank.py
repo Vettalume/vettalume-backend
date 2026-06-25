@@ -97,7 +97,7 @@ def _resolve_answer(opt_vals, correct_raw):
     return "tita", None, correct_raw
 
 
-def import_question_bank(db: Session, rows: list[dict]) -> dict:
+def import_question_bank(db: Session, rows: list[dict], usage_scope: str | None = None) -> dict:
     errors: list[dict] = []
     norm: list[dict] = []
     seen_ids: set[str] = set()
@@ -192,12 +192,14 @@ def import_question_bank(db: Session, rows: list[dict]) -> dict:
     db.flush()
 
     # ---- Pass 3: questions (reuse the QC gate; commits the whole transaction on success) ----
+    from ..schemas import UsageScopeIn
+    _scope = UsageScopeIn(usage_scope) if usage_scope else UsageScopeIn.both
     items = [ItemIn(
         item_id=n["id"], exam_code=n["exam"], section_key=n["section"], concept_node_id=n["concept_id"],
         archetype_id=n["archetype"], difficulty_d=n["diff"], format=ItemFormatIn(n["fmt"]),
         num_options=(len(n["opts"]) if n["opts"] else 0), stem=n["stem"], options=n["opts"],
         correct_answer=n["correct"], solution=n["solution"], time_benchmark_s=n["time"],
-        passage_set_id=n["passage"], status=n["status"],
+        passage_set_id=n["passage"], status=n["status"], usage_scope=_scope,
         provenance=({"source": n["source"]} if n["source"] else None),
     ) for n in norm]
     report = ingest_items(db, items)
