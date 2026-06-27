@@ -18,6 +18,13 @@ class Settings(BaseSettings):
     require_jwt: bool = False                    # True -> only Bearer JWT accepted (legacy X-Learner-Id disabled)
     admin_emails: str = ""                       # comma-separated admin emails (env ADMIN_EMAILS). Empty = secure default; bootstrap via scripts/create_admin.py
 
+    # --- Razorpay (env: RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET / RAZORPAY_WEBHOOK_SECRET) ---
+    # Use TEST keys (rzp_test_...) for development; LIVE keys (rzp_live_...) only in production.
+    # Empty key_id => payment endpoints return a clear "not configured" error instead of crashing.
+    razorpay_key_id: str = ""
+    razorpay_key_secret: str = ""
+    razorpay_webhook_secret: str = ""
+
     # --- connection pool (used for Postgres/any server DB; ignored for SQLite) ---
     # Total DB connections at peak ~= (web workers) x (db_pool_size + db_max_overflow). Keep that
     # under Postgres max_connections, or put pgbouncer in front to multiplex.

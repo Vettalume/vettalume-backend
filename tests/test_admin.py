@@ -195,11 +195,28 @@ def test_student_management_deregister_and_enroll():
         students = c.get("/admin/students", params={"q": "managed@x.com"}, headers=A).json()
         assert students["count"] == 1
         sid = students["students"][0]["id"]
-        assert any(co["exam"] == "CAT" for co in students["students"][0]["courses"])
+        assert "CAT" in students["students"][0]["exams"]
         dr = c.post(f"/admin/students/{sid}/deregister", json={"exam_code": "CAT"}, headers=A)
         assert dr.status_code == 200 and dr.json()["deregistered"] == "CAT"
-        assert not c.get(f"/admin/students/{sid}", headers=A).json()["courses"]
+        assert not c.get(f"/admin/students/{sid}", headers=A).json()["exams"]
         en = c.post(f"/admin/students/{sid}/enroll", json={"exam_code": "GMAT"}, headers=A)
         assert en.status_code == 200
-        assert any(co["exam"] == "GMAT" for co in c.get(f"/admin/students/{sid}", headers=A).json()["courses"])
+        assert "GMAT" in c.get(f"/admin/students/{sid}", headers=A).json()["exams"]
         assert c.post(f"/admin/students/{sid}/deregister", json={"exam_code": "GRE"}, headers=A).status_code == 404
+
+
+def test_node_rename_persists():
+    with TestClient(app) as c:
+        A = _admin(c, "rename-admin@vettalume.test")
+        c.post("/admin/topics", json={"id": "z-rn-t", "exam_code": "CAT", "section_key": "QA", "name": "Old Chapter"}, headers=A)
+        c.post("/admin/concepts", json={"id": "z-rn-c", "exam_code": "CAT", "section_key": "QA", "name": "Old Sub", "parent_id": "z-rn-t"}, headers=A)
+        # rename topic + concept
+        assert c.patch("/admin/nodes/z-rn-t", json={"name": "New Chapter"}, headers=A).json()["name"] == "New Chapter"
+        assert c.patch("/admin/nodes/z-rn-c", json={"name": "New Sub"}, headers=A).json()["name"] == "New Sub"
+        # empty name rejected, missing node 404
+        assert c.patch("/admin/nodes/z-rn-t", json={"name": "  "}, headers=A).status_code == 400
+        assert c.patch("/admin/nodes/nope", json={"name": "X"}, headers=A).status_code == 404
+        # new names show up in the syllabus
+        syl = c.get("/admin/syllabus", params={"exam": "CAT"}, headers=A).json()
+        names = {n["id"]: n["name"] for n in syl["nodes"]}
+        assert names["z-rn-t"] == "New Chapter" and names["z-rn-c"] == "New Sub"

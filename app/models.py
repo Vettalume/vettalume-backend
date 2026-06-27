@@ -17,6 +17,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -364,6 +365,38 @@ class Order(Base):
         DateTime(timezone=True), server_default=func.now())
 
 
+class PaymentOrder(Base):
+    """Tracks one Razorpay order through its lifecycle. The id IS the Razorpay order id, so the
+    webhook (which carries that id) can look the row up directly. Separate from Order so the
+    additive-only schema rule is respected (no new columns on existing tables)."""
+    __tablename__ = "payment_orders"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)        # razorpay order_id (order_...)
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id"), index=True)
+    plan_code: Mapped[str] = mapped_column(String(48))
+    amount_paise: Mapped[int] = mapped_column(Integer)                   # minor units charged
+    currency: Mapped[str] = mapped_column(String(8), default="INR")
+    status: Mapped[str] = mapped_column(String(16), default="created")  # created | paid | failed
+    rp_payment_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    granted: Mapped[bool] = mapped_column(Boolean, default=False)        # access granted? (idempotency guard)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Subscription(Base):
+    """Time-bound access to one exam, created when a payment is verified. Expiry lives here (the
+    Entitlement table can't gain columns), and the access guard treats a paid entitlement as expired
+    once its subscription lapses. Renewals extend expires_at."""
+    __tablename__ = "subscriptions"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    exam_code: Mapped[str] = mapped_column(ForeignKey("exams.code"))
+    plan_code: Mapped[str] = mapped_column(String(48))
+    order_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)  # the PaymentOrder/razorpay id
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)               # naive UTC; compared with utcnow()
+    status: Mapped[str] = mapped_column(String(16), default="active")    # active | expired | cancelled
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class PredictionRecord(Base):
     """One emitted prediction and (once known) its verified outcome. The aggregate over these rows
     IS the Honest Perimeter's published accuracy record: coverage of the bands and mean error."""
@@ -409,4 +442,93 @@ class AdminUser(Base):
 
     account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id"), primary_key=True)
     role: Mapped[str] = mapped_column(String(32), default="admin")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Coupon(Base):
+    """Discount code (additive table). Field names mirror the admin console exactly so the
+    frontend maps 1:1. Money fields are integers in the smallest currency unit (paise).
+    `value` is a percentage when type='percentage', else a paise amount. 0 on a limit means
+    'unlimited'. valid_from/valid_until are stored as the frontend's datetime-local strings."""
+
+    __tablename__ = "coupons"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    type: Mapped[str] = mapped_column(String(16), default="percentage")  # percentage | fixed
+    value: Mapped[int] = mapped_column(Integer, default=0)
+    max_total: Mapped[int] = mapped_column(Integer, default=0)
+    max_per_user: Mapped[int] = mapped_column(Integer, default=0)
+    min_purchase: Mapped[int] = mapped_column(Integer, default=0)
+    max_discount: Mapped[int] = mapped_column(Integer, default=0)
+    valid_from: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    valid_until: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    attempt: Mapped[str] = mapped_column(String(16), default="all")  # all | first | second | third
+    courses: Mapped[list] = mapped_column(JSONType, default=list)     # exam codes; [] = all
+    used: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(16), default="active")  # active | inactive
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class StudentProfile(Base):
+    """Extended student fields the admin console shows (additive table — no columns added to
+    `accounts`, so it works on existing DBs via create_all). Joined to Account for email/name;
+    enrollments live in Entitlement. `payment` is {status, amount, method, date}. `deleted` is a
+    soft-delete flag so the admin 'remove' hides a student without wiping their learning history."""
+
+    __tablename__ = "student_profiles"
+
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id"), primary_key=True)
+    phone: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="active")        # active | inactive
+    reg_type: Mapped[str] = mapped_column(String(16), default="registered")  # registered|trial|paid
+    purchased_course: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    last_login: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    payment: Mapped[dict] = mapped_column(JSONType, default=dict)
+    role: Mapped[str] = mapped_column(String(16), default="student")         # student | manager
+    joined: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Material(Base):
+    """A downloadable study material (PDF / slides / notes) attached to a concept node (additive
+    table). File bytes are stored in the DB for a fully self-contained, portable feature — fine for
+    modestly-sized study PDFs. At scale the bytes move to S3 object storage with signed URLs; only
+    the storage backend changes, the table and endpoints stay. Delivery is entitlement-gated."""
+
+    __tablename__ = "materials"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    node_id: Mapped[str] = mapped_column(ForeignKey("knowledge_nodes.id"), index=True)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    filename: Mapped[str] = mapped_column(String(255), default="")
+    content_type: Mapped[str] = mapped_column(String(128), default="application/pdf")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Mock(Base):
+    """An admin-authored fixed-form mock test (additive table). `type` is 'sectional' or 'full'.
+    The whole section/question structure is stored as JSON in `sections` (each section carries its
+    embedded questions) so a mock is a self-contained paper — every student who takes it sees the
+    same questions, which is what the admin console builds. Type-specific scalars live in columns."""
+
+    __tablename__ = "mocks"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    exam_code: Mapped[str] = mapped_column(ForeignKey("exams.code"), index=True)
+    type: Mapped[str] = mapped_column(String(16))  # sectional | full
+    name: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(16), default="draft")  # draft | published
+    negative: Mapped[int] = mapped_column(Integer, default=0)          # sectional negative marking
+    duration: Mapped[int] = mapped_column(Integer, default=0)          # full-mock total minutes
+    scoring_marks: Mapped[int] = mapped_column(Integer, default=1)     # full-mock marks per correct
+    scoring_neg: Mapped[int] = mapped_column(Integer, default=0)       # full-mock negative per wrong
+    instructions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    sections: Mapped[list] = mapped_column(JSONType, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

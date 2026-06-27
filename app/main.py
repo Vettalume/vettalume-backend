@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import settings
 from .db import init_db
 from .routers import (account, admin, analysis, auth, billing, catalog, diagnosis, ingest, learn,
-                      mocks, practice, psychometrics, review)
+                      mocks, payments, practice, psychometrics, review)
 from .seed import seed_if_empty
 
 
@@ -54,7 +54,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title=settings.app_name, version="0.10.0 (Phase 9 — content CMS + student management)", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.16.1 (Phase 15 — Razorpay payments; receipt length fix)", lifespan=lifespan)
 
 # Dev-only: allow any origin so a separately-hosted frontend can call the API.
 app.add_middleware(
@@ -80,6 +80,7 @@ app.include_router(review.router)
 app.include_router(review.honesty_router)
 app.include_router(account.router)
 app.include_router(admin.router)
+app.include_router(payments.router)
 
 
 @app.get("/health", tags=["meta"])

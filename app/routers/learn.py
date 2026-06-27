@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import models
+from ..config import settings
 from ..deps import get_current_learner, get_db
 from ..schemas import LearnAnswerIn
 from ..services import knowledge_graph as kg
@@ -71,3 +73,24 @@ def concept_detail(node_id: str,
         "due_for_review": cs.due_for_review,
         "content": {"body": content.get("body", ""), "videos": content.get("videos", [])},
     }
+
+
+@router.get("/materials/{mid}/download")
+def download_material(mid: str, learner=Depends(get_current_learner), db: Session = Depends(get_db)):
+    """Stream a study material's file, gated by the learner's entitlement for the owning exam.
+    The entitlement check is the materials paywall; it is enforced only when enforce_entitlements
+    is on (so the open demo keeps working). This is where an S3 signed-URL redirect would slot in."""
+    m = db.get(models.Material, mid)
+    if m is None:
+        raise HTTPException(404, "no such material")
+    node = db.get(models.KnowledgeNode, m.node_id)
+    exam = node.exam_code if node else None
+    if settings.enforce_entitlements and exam:
+        ent = db.scalar(select(models.Entitlement).where(
+            models.Entitlement.account_id == learner.id,
+            models.Entitlement.exam_code == exam,
+            models.Entitlement.status.in_(("free", "active"))))
+        if ent is None:
+            raise HTTPException(403, f"you need access to {exam} to download this material")
+    return Response(content=m.data, media_type=m.content_type,
+                    headers={"Content-Disposition": f'inline; filename="{m.filename}"'})

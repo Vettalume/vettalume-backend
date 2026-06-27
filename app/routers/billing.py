@@ -49,3 +49,15 @@ def purchase(body: PurchaseIn, learner=Depends(get_current_learner),
              db: Session = Depends(get_db)) -> dict:
     """Record a purchase and grant entitlements. Does not move money (no PSP wired)."""
     return billing.purchase(db, learner, body.plan_code)
+
+
+class CouponCheckIn(BaseModel):
+    code: str
+    exam: str | None = None
+    amount: int = 0
+
+
+@router.post("/coupon/validate")
+def validate_coupon_endpoint(body: CouponCheckIn, db: Session = Depends(get_db)) -> dict:
+    """Preview the discount a coupon gives for an order. Public (no auth) — it only reads."""
+    return billing.validate_coupon(db, body.code, body.exam, body.amount)

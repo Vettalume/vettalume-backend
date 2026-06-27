@@ -60,6 +60,16 @@ def register(body: RegisterIn, db: Session = Depends(get_db)) -> dict:
     return _auth_response(acct)
 
 
+def _touch_last_login(db: Session, acct: "models.Account") -> None:
+    """Record this sign-in time on the student's profile (get-or-create the row)."""
+    prof = db.get(models.StudentProfile, acct.id)
+    if prof is None:
+        prof = models.StudentProfile(account_id=acct.id)
+        db.add(prof)
+    prof.last_login = datetime.now().strftime("%Y-%m-%d %H:%M")
+    db.commit()
+
+
 @router.post("/login")
 def login(body: LoginIn, db: Session = Depends(get_db)) -> dict:
     """Verify email + password and return a Bearer JWT."""
@@ -68,6 +78,7 @@ def login(body: LoginIn, db: Session = Depends(get_db)) -> dict:
     # one message for both failure modes -> no account enumeration
     if acct is None or cred is None or not security.verify_password(body.password, cred.password_hash):
         raise HTTPException(401, "invalid email or password")
+    _touch_last_login(db, acct)
     return _auth_response(acct)
 
 
@@ -95,5 +106,6 @@ def dev_login(body: DevLoginIn, db: Session = Depends(get_db)) -> TokenOut:
     if ent is None and db.get(models.Exam, body.exam_code) is not None:
         db.add(models.Entitlement(account_id=acct.id, exam_code=body.exam_code, status="active"))
 
+    _touch_last_login(db, acct)
     db.commit()
     return TokenOut(access_token=security.make_token(acct.id), learner_id=str(acct.id))

@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import io
 import uuid
+from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
@@ -195,6 +196,24 @@ def delete_node(node_id: str, db: Session = Depends(get_db)) -> dict:
     db.delete(n)
     db.commit()
     return {"ok": True, "deleted": node_id}
+
+
+class NodeRenameIn(BaseModel):
+    name: str
+
+
+@router.patch("/nodes/{node_id}")
+def rename_node(node_id: str, body: NodeRenameIn, db: Session = Depends(get_db)) -> dict:
+    """Rename a chapter (topic) or subtopic (concept). Content, children and items are untouched."""
+    n = db.get(models.KnowledgeNode, node_id)
+    if n is None:
+        raise HTTPException(404, f"no node {node_id!r}")
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(400, "name cannot be empty")
+    n.name = name
+    db.commit()
+    return {"id": n.id, "name": n.name, "kind": n.kind}
 
 
 # ───────────────────────── items ─────────────────────────
@@ -480,51 +499,212 @@ class EnrollIn(BaseModel):
     exam_code: str
 
 
+class StudentIn(BaseModel):
+    name: str = ""
+    email: str
+    phone: Optional[str] = ""
+    status: str = "active"
+    regType: str = "registered"
+    purchasedCourse: Optional[str] = None
+    progress: int = 0
+    verified: bool = False
+    payment: Optional[dict] = None
+    exams: list[str] = Field(default_factory=list)
+
+
+class PaymentIn(BaseModel):
+    status: Optional[str] = None
+    amount: Optional[int] = None
+    method: Optional[str] = None
+    autoVerify: bool = False
+
+
+class EnrollmentsIn(BaseModel):
+    exams: list[str] = Field(default_factory=list)
+
+
+def _account(db: Session, sid: str) -> "models.Account":
+    try:
+        a = db.get(models.Account, uuid.UUID(sid))
+    except (ValueError, TypeError):
+        a = None
+    if a is None:
+        raise HTTPException(404, "no such student")
+    return a
+
+
+def _ensure_profile(db: Session, account_id) -> "models.StudentProfile":
+    p = db.get(models.StudentProfile, account_id)
+    if p is None:
+        p = models.StudentProfile(account_id=account_id)
+        db.add(p)
+        db.flush()
+    return p
+
+
+def _sync_enrollments(db: Session, account_id, exams) -> None:
+    """Make the student's entitlements exactly match `exams` (add missing, remove extra)."""
+    want = {e for e in (exams or []) if db.get(models.Exam, e) is not None}
+    have = {e.exam_code: e for e in db.scalars(
+        select(models.Entitlement).where(models.Entitlement.account_id == account_id)).all()}
+    for ex in want - set(have):
+        db.add(models.Entitlement(account_id=account_id, exam_code=ex, status="active"))
+    for ex, ent in have.items():
+        if ex not in want:
+            db.delete(ent)
+
+
+def _student_out(db: Session, a: "models.Account", admin_ids=None) -> dict:
+    """The admin console's exact student shape (camelCase)."""
+    if admin_ids is None:
+        admin_ids = {x.account_id for x in db.scalars(select(models.AdminUser)).all()}
+    p = db.get(models.StudentProfile, a.id)
+    ents = db.scalars(select(models.Entitlement).where(models.Entitlement.account_id == a.id)).all()
+    pay = (p.payment if (p and p.payment) else {}) or {}
+    joined = (p.joined if (p and p.joined) else None) or (
+        a.created_at.date().isoformat() if getattr(a, "created_at", None) else None)
+    return {
+        "id": str(a.id),
+        "name": a.display_name or (a.email.split("@")[0] if a.email else ""),
+        "email": a.email,
+        "phone": (p.phone if p else "") or "",
+        "exams": [e.exam_code for e in ents],
+        "status": (p.status if p else "active") or "active",
+        "regType": (p.reg_type if p else "registered") or "registered",
+        "purchasedCourse": (p.purchased_course if p else None),
+        "verified": bool(p.verified) if p else False,
+        "lastLogin": (p.last_login if (p and p.last_login) else None) or "—",
+        "progress": (p.progress if p else 0) or 0,
+        "payment": {
+            "status": pay.get("status"),
+            "amount": pay.get("amount", 0),
+            "method": pay.get("method"),
+            "date": pay.get("date"),
+        },
+        "role": (p.role if p else "student") or "student",
+        "joined": joined,
+        "isAdmin": a.id in admin_ids,
+    }
+
+
 @router.get("/students")
-def list_students(q: Optional[str] = None, limit: int = 100, db: Session = Depends(get_db)) -> dict:
+def list_students(q: Optional[str] = None, limit: int = 200, db: Session = Depends(get_db)) -> dict:
     query = select(models.Account)
     if q:
         query = query.where(func.lower(models.Account.email).like(f"%{q.lower()}%"))
     accts = db.scalars(query.limit(limit)).all()
-    admin_ids = {a.account_id for a in db.scalars(select(models.AdminUser)).all()}
-    out = []
-    for a in accts:
-        ents = db.scalars(select(models.Entitlement).where(models.Entitlement.account_id == a.id)).all()
-        out.append({
-            "id": str(a.id), "email": a.email, "display_name": a.display_name,
-            "is_admin": a.id in admin_ids,
-            "courses": [{"exam": e.exam_code, "status": e.status} for e in ents],
-        })
+    admin_ids = {x.account_id for x in db.scalars(select(models.AdminUser)).all()}
+    deleted_ids = {p.account_id for p in db.scalars(
+        select(models.StudentProfile).where(models.StudentProfile.deleted.is_(True))).all()}
+    out = [_student_out(db, a, admin_ids) for a in accts if a.id not in deleted_ids]
     return {"count": len(out), "students": out}
 
 
 @router.get("/students/{sid}")
 def student_detail(sid: str, db: Session = Depends(get_db)) -> dict:
-    try:
-        a = db.get(models.Account, uuid.UUID(sid))
-    except (ValueError, TypeError):
-        a = None
-    if a is None:
-        raise HTTPException(404, "no such student")
-    ents = db.scalars(select(models.Entitlement).where(models.Entitlement.account_id == a.id)).all()
+    a = _account(db, sid)
     n_resp = db.scalar(select(func.count()).select_from(models.Response).where(
         models.Response.learner_id == a.id)) or 0
-    return {
-        "id": str(a.id), "email": a.email, "display_name": a.display_name,
-        "courses": [{"exam": e.exam_code, "status": e.status} for e in ents],
-        "responses": int(n_resp),
-    }
+    out = _student_out(db, a)
+    out["responses"] = int(n_resp)
+    return out
+
+
+@router.post("/students")
+def create_student(body: StudentIn, db: Session = Depends(get_db)) -> dict:
+    email = (body.email or "").strip().lower()
+    if not email:
+        raise HTTPException(400, "email is required")
+    if db.scalar(select(models.Account).where(func.lower(models.Account.email) == email)):
+        raise HTTPException(409, f"an account with email {email!r} already exists")
+    a = models.Account(email=email, display_name=(body.name or "").strip() or email.split("@")[0])
+    db.add(a)
+    db.flush()
+    db.add(models.StudentProfile(
+        account_id=a.id, phone=(body.phone or ""), status=body.status, reg_type=body.regType,
+        purchased_course=body.purchasedCourse, verified=body.verified, progress=body.progress,
+        payment=(body.payment or {}), role="student", joined=datetime.now().date().isoformat(),
+    ))
+    _sync_enrollments(db, a.id, body.exams)
+    db.commit()
+    return _student_out(db, a)
+
+
+@router.put("/students/{sid}")
+def update_student(sid: str, body: StudentIn, db: Session = Depends(get_db)) -> dict:
+    a = _account(db, sid)
+    if body.name:
+        a.display_name = body.name.strip()
+    new_email = (body.email or "").strip().lower()
+    if new_email and new_email != a.email:
+        if db.scalar(select(models.Account).where(func.lower(models.Account.email) == new_email)):
+            raise HTTPException(409, f"an account with email {new_email!r} already exists")
+        a.email = new_email
+    p = _ensure_profile(db, a.id)
+    p.phone = body.phone or ""
+    p.status = body.status
+    p.reg_type = body.regType
+    p.purchased_course = body.purchasedCourse
+    p.progress = body.progress
+    p.verified = body.verified
+    if body.payment is not None:
+        p.payment = body.payment
+    _sync_enrollments(db, a.id, body.exams)
+    db.commit()
+    return _student_out(db, a)
+
+
+@router.delete("/students/{sid}")
+def delete_student(sid: str, db: Session = Depends(get_db)) -> dict:
+    """Soft-delete: hides the student from the roster but preserves their learning history
+    (responses, ability estimates) so nothing is silently destroyed and FKs stay intact."""
+    a = _account(db, sid)
+    p = _ensure_profile(db, a.id)
+    p.deleted = True
+    db.commit()
+    return {"ok": True, "deleted": str(a.id)}
+
+
+@router.post("/students/{sid}/verify")
+def verify_student(sid: str, db: Session = Depends(get_db)) -> dict:
+    a = _account(db, sid)
+    p = _ensure_profile(db, a.id)
+    p.verified = not p.verified
+    db.commit()
+    return _student_out(db, a)
+
+
+@router.post("/students/{sid}/payment")
+def set_student_payment(sid: str, body: PaymentIn, db: Session = Depends(get_db)) -> dict:
+    a = _account(db, sid)
+    p = _ensure_profile(db, a.id)
+    pay = dict(p.payment or {})
+    pay["status"] = body.status
+    if body.amount is not None:
+        pay["amount"] = body.amount
+    if body.method:
+        pay["method"] = body.method
+    if not pay.get("date"):
+        pay["date"] = datetime.now().date().isoformat()
+    p.payment = pay
+    if body.autoVerify and body.status == "successful":
+        p.verified = True
+    db.commit()
+    return _student_out(db, a)
+
+
+@router.put("/students/{sid}/enrollments")
+def set_student_enrollments(sid: str, body: EnrollmentsIn, db: Session = Depends(get_db)) -> dict:
+    a = _account(db, sid)
+    _sync_enrollments(db, a.id, body.exams)
+    db.commit()
+    return _student_out(db, a)
 
 
 @router.post("/students/{sid}/deregister")
 def deregister_student(sid: str, body: EnrollIn, db: Session = Depends(get_db)) -> dict:
     """Remove a student from a course (revokes their entitlement for that exam)."""
-    try:
-        a = db.get(models.Account, uuid.UUID(sid))
-    except (ValueError, TypeError):
-        a = None
-    if a is None:
-        raise HTTPException(404, "no such student")
+    a = _account(db, sid)
     ents = db.scalars(select(models.Entitlement).where(
         models.Entitlement.account_id == a.id,
         models.Entitlement.exam_code == body.exam_code)).all()
@@ -539,12 +719,7 @@ def deregister_student(sid: str, body: EnrollIn, db: Session = Depends(get_db)) 
 @router.post("/students/{sid}/enroll")
 def enroll_student(sid: str, body: EnrollIn, db: Session = Depends(get_db)) -> dict:
     """Enrol a student into a course (grants/reactivates their entitlement)."""
-    try:
-        a = db.get(models.Account, uuid.UUID(sid))
-    except (ValueError, TypeError):
-        a = None
-    if a is None:
-        raise HTTPException(404, "no such student")
+    a = _account(db, sid)
     if db.get(models.Exam, body.exam_code) is None:
         raise HTTPException(404, f"no exam {body.exam_code!r}")
     ent = db.scalar(select(models.Entitlement).where(
@@ -555,3 +730,296 @@ def enroll_student(sid: str, body: EnrollIn, db: Session = Depends(get_db)) -> d
         db.add(models.Entitlement(account_id=a.id, exam_code=body.exam_code, status="active"))
     db.commit()
     return {"ok": True, "enrolled": body.exam_code}
+
+
+# ═══════════════════════════════ coupons / discount codes ═══════════════════════════════
+class CouponIn(BaseModel):
+    code: str
+    type: str                       # 'percentage' | 'fixed'
+    value: int = 0
+    maxTotal: int = 0
+    maxPerUser: int = 0
+    minPurchase: int = 0
+    maxDiscount: int = 0
+    validFrom: Optional[str] = None
+    validUntil: Optional[str] = None
+    description: Optional[str] = ""
+    attempt: str = "all"
+    courses: list[str] = Field(default_factory=list)
+
+
+def _coupon_out(c: "models.Coupon") -> dict:
+    """Serialize to the admin console's exact camelCase shape."""
+    return {
+        "id": c.id, "code": c.code, "type": c.type, "value": c.value,
+        "maxTotal": c.max_total, "maxPerUser": c.max_per_user,
+        "minPurchase": c.min_purchase, "maxDiscount": c.max_discount,
+        "validFrom": c.valid_from, "validUntil": c.valid_until,
+        "description": c.description or "", "attempt": c.attempt,
+        "courses": c.courses or [], "used": c.used, "status": c.status,
+    }
+
+
+@router.get("/coupons")
+def list_coupons(db: Session = Depends(get_db)) -> dict:
+    cs = db.scalars(select(models.Coupon).order_by(models.Coupon.created_at.desc())).all()
+    return {"count": len(cs), "coupons": [_coupon_out(c) for c in cs]}
+
+
+@router.post("/coupons")
+def create_coupon(body: CouponIn, db: Session = Depends(get_db)) -> dict:
+    code = (body.code or "").strip().upper()
+    if not code:
+        raise HTTPException(400, "coupon code is required")
+    if body.type not in ("percentage", "fixed"):
+        raise HTTPException(400, "type must be 'percentage' or 'fixed'")
+    if db.scalar(select(models.Coupon).where(func.upper(models.Coupon.code) == code)):
+        raise HTTPException(409, f"a coupon with code {code!r} already exists")
+    c = models.Coupon(
+        id=uuid.uuid4().hex, code=code, type=body.type, value=body.value,
+        max_total=body.maxTotal, max_per_user=body.maxPerUser, min_purchase=body.minPurchase,
+        max_discount=body.maxDiscount, valid_from=(body.validFrom or None),
+        valid_until=(body.validUntil or None), description=(body.description or ""),
+        attempt=(body.attempt or "all"), courses=list(body.courses or []), used=0, status="active",
+    )
+    db.add(c)
+    db.commit()
+    return _coupon_out(c)
+
+
+@router.put("/coupons/{cid}")
+def update_coupon(cid: str, body: CouponIn, db: Session = Depends(get_db)) -> dict:
+    c = db.get(models.Coupon, cid)
+    if c is None:
+        raise HTTPException(404, "no such coupon")
+    code = (body.code or "").strip().upper()
+    if not code:
+        raise HTTPException(400, "coupon code is required")
+    if code != c.code and db.scalar(select(models.Coupon).where(func.upper(models.Coupon.code) == code)):
+        raise HTTPException(409, f"a coupon with code {code!r} already exists")
+    c.code, c.type, c.value = code, body.type, body.value
+    c.max_total, c.max_per_user = body.maxTotal, body.maxPerUser
+    c.min_purchase, c.max_discount = body.minPurchase, body.maxDiscount
+    c.valid_from, c.valid_until = (body.validFrom or None), (body.validUntil or None)
+    c.description, c.attempt = (body.description or ""), (body.attempt or "all")
+    c.courses = list(body.courses or [])
+    db.commit()
+    return _coupon_out(c)
+
+
+@router.post("/coupons/{cid}/toggle")
+def toggle_coupon(cid: str, db: Session = Depends(get_db)) -> dict:
+    c = db.get(models.Coupon, cid)
+    if c is None:
+        raise HTTPException(404, "no such coupon")
+    c.status = "inactive" if c.status == "active" else "active"
+    db.commit()
+    return _coupon_out(c)
+
+
+@router.delete("/coupons/{cid}")
+def delete_coupon(cid: str, db: Session = Depends(get_db)) -> dict:
+    c = db.get(models.Coupon, cid)
+    if c is None:
+        raise HTTPException(404, "no such coupon")
+    code = c.code
+    db.delete(c)
+    db.commit()
+    return {"ok": True, "deleted": code}
+
+
+# ═══════════════════════════ study materials (PDF / slides / notes) ═══════════════════════════
+_MAX_MATERIAL_BYTES = 25 * 1024 * 1024  # 25 MB cap for DB-stored files
+
+
+def _size_label(n: int) -> str:
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.0f} KB"
+    return f"{n / (1024 * 1024):.1f} MB"
+
+
+def _material_out(m: "models.Material") -> dict:
+    return {
+        "id": m.id, "title": m.title, "filename": m.filename, "contentType": m.content_type,
+        "size": m.size_bytes, "sizeLabel": _size_label(m.size_bytes),
+    }
+
+
+@router.get("/concepts/{node_id}/materials")
+def list_materials(node_id: str, db: Session = Depends(get_db)) -> dict:
+    if db.get(models.KnowledgeNode, node_id) is None:
+        raise HTTPException(404, "no such concept")
+    ms = db.scalars(select(models.Material).where(models.Material.node_id == node_id)
+                    .order_by(models.Material.created_at)).all()
+    return {"count": len(ms), "materials": [_material_out(m) for m in ms]}
+
+
+@router.post("/concepts/{node_id}/materials")
+async def upload_material(node_id: str, file: UploadFile = File(...),
+                          title: Optional[str] = Form(None), db: Session = Depends(get_db)) -> dict:
+    if db.get(models.KnowledgeNode, node_id) is None:
+        raise HTTPException(404, "no such concept")
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "the uploaded file is empty")
+    if len(data) > _MAX_MATERIAL_BYTES:
+        raise HTTPException(413, f"file is too large (max {_size_label(_MAX_MATERIAL_BYTES)})")
+    m = models.Material(
+        id=uuid.uuid4().hex, node_id=node_id,
+        title=(title or file.filename or "Untitled"),
+        filename=(file.filename or "material"),
+        content_type=(file.content_type or "application/octet-stream"),
+        size_bytes=len(data), data=data,
+    )
+    db.add(m)
+    db.commit()
+    return _material_out(m)
+
+
+@router.delete("/materials/{mid}")
+def delete_material(mid: str, db: Session = Depends(get_db)) -> dict:
+    m = db.get(models.Material, mid)
+    if m is None:
+        raise HTTPException(404, "no such material")
+    db.delete(m)
+    db.commit()
+    return {"ok": True, "deleted": mid}
+
+
+# ═══════════════════════════ mock builder (fixed-form mocks) ═══════════════════════════
+class MockCreateIn(BaseModel):
+    type: str                       # sectional | full
+    name: str
+    exam: str
+    negative: int = 0
+    duration: int = 0
+    scoringMarks: int = 1
+    scoringNeg: int = 0
+    instructions: Optional[str] = ""
+
+
+class MockConfigIn(BaseModel):
+    name: Optional[str] = None
+    negative: Optional[int] = None
+    duration: Optional[int] = None
+    scoringMarks: Optional[int] = None
+    scoringNeg: Optional[int] = None
+    instructions: Optional[str] = None
+
+
+class MockStructureIn(BaseModel):
+    sections: list = Field(default_factory=list)  # full sections tree with embedded questions
+
+
+def _mock_out(m: "models.Mock") -> dict:
+    secs = m.sections or []
+    tq = sum(len(s.get("questions", [])) for s in secs)
+    tm = sum(int(s.get("time", 0) or 0) for s in secs)
+    return {
+        "id": m.id, "exam": m.exam_code, "type": m.type, "name": m.name, "status": m.status,
+        "negative": m.negative, "duration": m.duration,
+        "scoringMarks": m.scoring_marks, "scoringNeg": m.scoring_neg,
+        "instructions": m.instructions or "", "sections": secs,
+        "totalQuestions": tq, "totalTime": tm,
+        "attempts": [],  # results need a student mock-taking flow (a later phase)
+    }
+
+
+def _mock_or_404(db: Session, mid: str) -> "models.Mock":
+    m = db.get(models.Mock, mid)
+    if m is None:
+        raise HTTPException(404, "no such mock")
+    return m
+
+
+@router.get("/mocks")
+def list_mocks(exam: str, type: Optional[str] = None, db: Session = Depends(get_db)) -> dict:
+    q = select(models.Mock).where(models.Mock.exam_code == exam)
+    if type:
+        q = q.where(models.Mock.type == type)
+    ms = db.scalars(q.order_by(models.Mock.created_at)).all()
+    return {"count": len(ms), "mocks": [_mock_out(m) for m in ms]}
+
+
+@router.post("/mocks")
+def create_mock(body: MockCreateIn, db: Session = Depends(get_db)) -> dict:
+    if body.type not in ("sectional", "full"):
+        raise HTTPException(400, "type must be 'sectional' or 'full'")
+    if db.get(models.Exam, body.exam) is None:
+        raise HTTPException(404, f"no exam {body.exam!r}")
+    keys = [s.key for s in db.scalars(select(models.Section).where(
+        models.Section.exam_code == body.exam).order_by(models.Section.key)).all()]
+    if body.type == "sectional":
+        first = keys[0] if keys else "Section 1"
+        sections = [{"id": uuid.uuid4().hex, "name": first, "time": 40, "numQuestions": 0, "questions": []}]
+    else:
+        sections = ([{"id": uuid.uuid4().hex, "name": k, "questions": []} for k in keys]
+                    or [{"id": uuid.uuid4().hex, "name": "Section 1", "questions": []}])
+    m = models.Mock(
+        id=uuid.uuid4().hex, exam_code=body.exam, type=body.type, name=body.name, status="draft",
+        negative=body.negative, duration=body.duration, scoring_marks=body.scoringMarks,
+        scoring_neg=body.scoringNeg, instructions=(body.instructions or ""), sections=sections,
+    )
+    db.add(m)
+    db.commit()
+    return _mock_out(m)
+
+
+@router.get("/mocks/{mid}")
+def get_mock(mid: str, db: Session = Depends(get_db)) -> dict:
+    return _mock_out(_mock_or_404(db, mid))
+
+
+@router.put("/mocks/{mid}")
+def update_mock_config(mid: str, body: MockConfigIn, db: Session = Depends(get_db)) -> dict:
+    m = _mock_or_404(db, mid)
+    if body.name is not None:
+        m.name = body.name
+    if body.negative is not None:
+        m.negative = body.negative
+    if body.duration is not None:
+        m.duration = body.duration
+    if body.scoringMarks is not None:
+        m.scoring_marks = body.scoringMarks
+    if body.scoringNeg is not None:
+        m.scoring_neg = body.scoringNeg
+    if body.instructions is not None:
+        m.instructions = body.instructions
+    db.commit()
+    return _mock_out(m)
+
+
+@router.put("/mocks/{mid}/structure")
+def set_mock_structure(mid: str, body: MockStructureIn, db: Session = Depends(get_db)) -> dict:
+    """Replace the whole sections/questions tree. The console mutates the mock in memory
+    (add/edit/move/delete sections and questions, bulk import) then persists the result here."""
+    m = _mock_or_404(db, mid)
+    secs = body.sections or []
+    for s in secs:
+        if not isinstance(s, dict):
+            raise HTTPException(400, "each section must be an object")
+        s.setdefault("id", uuid.uuid4().hex)
+        for qz in s.get("questions", []) or []:
+            if isinstance(qz, dict):
+                qz.setdefault("id", uuid.uuid4().hex)
+    m.sections = secs
+    db.commit()
+    return _mock_out(m)
+
+
+@router.post("/mocks/{mid}/publish")
+def toggle_mock_publish(mid: str, db: Session = Depends(get_db)) -> dict:
+    m = _mock_or_404(db, mid)
+    m.status = "draft" if m.status == "published" else "published"
+    db.commit()
+    return _mock_out(m)
+
+
+@router.delete("/mocks/{mid}")
+def delete_mock(mid: str, db: Session = Depends(get_db)) -> dict:
+    m = _mock_or_404(db, mid)
+    db.delete(m)
+    db.commit()
+    return {"ok": True, "deleted": mid}

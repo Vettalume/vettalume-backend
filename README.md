@@ -785,3 +785,56 @@ The admin portal (`/admin`) gained a full content-management surface that mirror
 
 Interactive engine tools: `scripts/irt_mock.py` (adaptive IRT, watch θ tighten) and `scripts/mab_play.py` (Learning loop — the bandit picks each question; watch mastery, the MAPLE edge, and concept unlocks). `scripts/mab_drive.py` drives the MAB deterministically at a set accuracy.
 
+## Phase 10 — Coupons / discount codes (v0.11.0)
+
+A complete discount-code system, with field names matching the admin console 1:1 (so the Coupons page maps with no translation).
+
+**Model.** New additive table `coupons`: `code` (unique), `type` (`percentage`|`fixed`), `value`, `maxTotal`/`maxPerUser` (0 = unlimited), `minPurchase`, `maxDiscount`, `validFrom`/`validUntil` (datetime-local strings), `description`, `attempt`, `courses[]` (exam codes; [] = all), plus server-managed `used` and `status`. Money fields are integer paise; `value` is a percent when `type='percentage'`.
+
+**Admin CRUD** (all under the admin perimeter, camelCase in/out): `GET /admin/coupons`, `POST /admin/coupons` (rejects duplicate codes, 409), `PUT /admin/coupons/{id}`, `POST /admin/coupons/{id}/toggle` (active↔inactive), `DELETE /admin/coupons/{id}`.
+
+**Checkout validation** (public, read-only — the backend for "apply coupon at checkout"): `POST /billing/coupon/validate` with `{code, exam, amount}` → `{valid, discount, final, reason}`. Enforces active status, the validity window, total-use limit, course scope, and minimum purchase, then computes the discount (percentage capped at `maxDiscount`, or fixed), clamped to the order amount. Service: `billing.validate_coupon`.
+
+> Not yet wired: consuming a use (incrementing `used`) and per-user limits happen at real redemption, which belongs in the purchase flow alongside the payment provider (a later phase). The admin Coupons page is fully served today.
+
+Remaining backend gaps to close before the rest of the admin frontend connects: **student fields + verification**, **PDF/study materials** (signed-URL pattern, like video), **the mock builder + results** (fixed-form vs adaptive — a product decision), and **payments** (real Stripe/Razorpay).
+
+## Phase 11 — Student fields + verification (v0.12.0)
+
+Makes the admin **People** page real: the full student record the console shows, backed by the API with matching camelCase fields.
+
+**Model.** New additive table `student_profiles` (joined to `accounts`, so no columns are added to the existing table): `phone`, `status` (active|inactive), `reg_type` (registered|trial|paid), `purchased_course`, `verified`, `progress`, `last_login`, `payment` JSON `{status, amount, method, date}`, `role`, `joined`, and a `deleted` soft-delete flag. Enrollments stay in `Entitlement` (the source of truth for which courses a student has).
+
+**Endpoints** (under the admin perimeter; every student response is the console's exact shape — `{id, name, email, phone, exams, status, regType, purchasedCourse, verified, lastLogin, progress, payment, role, joined, isAdmin}`):
+`GET /admin/students` (roster, excludes soft-deleted, `q` search), `GET /admin/students/{id}` (+ `responses` count), `POST /admin/students` (create account + profile + entitlements; duplicate email → 409), `PUT /admin/students/{id}` (edit fields, change email with uniqueness, sync enrollments), `DELETE /admin/students/{id}` (**soft delete** — hides from roster, keeps learning history and FKs intact), `POST /admin/students/{id}/verify` (toggle), `POST /admin/students/{id}/payment` (`{status, amount?, method?, autoVerify?}` — autoVerify marks the account verified on a successful payment), `PUT /admin/students/{id}/enrollments` (`{exams:[]}` set the exact course set). The per-course `enroll`/`deregister` endpoints remain.
+
+**Real last-login.** `/auth/login` and `/auth/dev-login` now record `last_login` on the student's profile, so `lastLogin` reflects actual sign-ins rather than a seeded value.
+
+> `progress` is currently a stored field (admin-set); deriving it automatically from the learner's real mastery across the syllabus is a later enhancement.
+
+Remaining backend gaps: **PDF/study materials** (signed-URL pattern, like video), **the mock builder + results** (fixed-form vs adaptive — still needs a product decision), and **payments** (real Stripe/Razorpay).
+
+## Phase 12 — Study materials / PDF (v0.13.0)
+
+The real implementation behind the admin console's "Upload material" placeholder: actual file upload, storage, and entitlement-gated download per concept.
+
+**Model.** New additive table `materials`: `id`, `node_id` (FK → the concept), `title`, `filename`, `content_type`, `size_bytes`, `data` (the file bytes), `created_at`. Bytes are stored in the DB so the feature is fully self-contained and portable (fine for modestly-sized study PDFs). At scale the bytes move to S3 object storage with signed URLs — only the storage backend changes; the table and endpoints stay.
+
+**Admin endpoints** (behind the admin perimeter): `POST /admin/concepts/{node_id}/materials` (multipart `file` + optional `title`; 25 MB cap; empty → 400, too-large → 413), `GET /admin/concepts/{node_id}/materials` (metadata list — `{id, title, filename, contentType, size, sizeLabel}`), `DELETE /admin/materials/{id}`.
+
+**Gated download** (student-facing): `GET /learn/materials/{id}/download` streams the file with the right `Content-Type`/`Content-Disposition`, **gated by the learner's entitlement** for the concept's exam. The gate is the materials paywall — enforced only when `enforce_entitlements` is on, so the open demo keeps working; it's the exact point an S3 signed-URL redirect would slot in. Verified: with enforcement on, a learner without the exam gets 403; granting the entitlement makes it 200.
+
+Remaining backend gaps: **the mock builder + results** (fixed-form vs adaptive — still needs a product decision) and **payments** (real Stripe/Razorpay).
+
+## Phase 13 — Mock builder, fixed-form (v0.14.0)
+
+Admin-authored **fixed-form** mocks: every student who takes a mock sees the same paper the admin built. (Adaptive mock delivery still exists separately in the engine; this adds the fixed-form authoring the console builds.)
+
+**Model.** New additive table `mocks`: `type` ('sectional' | 'full'), `name`, `status` ('draft' | 'published'), and type-specific scalars `negative` (sectional), `duration` / `scoring_marks` / `scoring_neg` / `instructions` (full). The whole section/question tree is stored as JSON in `sections` — each section carries its embedded questions (`{id, text, options, correct, difficulty, solution, image}`), so a mock is a self-contained paper.
+
+**Endpoints** (admin perimeter, camelCase matching the console): `GET /admin/mocks?exam=&type=` (list), `POST /admin/mocks` (create — sectional seeds one section, full seeds all of the exam's real sections), `GET /admin/mocks/{id}`, `PUT /admin/mocks/{id}` (config: name / negative / duration / scoring / instructions), `PUT /admin/mocks/{id}/structure` (persist the whole sections + questions tree — the console mutates the mock in memory then saves the result here, which covers add/edit/move/delete/bulk-import in one call), `POST /admin/mocks/{id}/publish` (draft ↔ published), `DELETE /admin/mocks/{id}`.
+
+> **Results/attempts are not in this phase.** The console's analytics (who attempted, scores, section-wise performance) require a *student* mock-taking flow that doesn't exist yet — the attempts shown in the frontend are seed data. Building mock delivery + scoring + an attempt ledger for fixed-form mocks is the natural next step, and it's where the existing adaptive `mock_delivery`/`mock_scoring` services would be extended.
+
+Remaining backend gaps: **mock taking + results** (student-facing, generates the analytics), and **payments** (real Stripe/Razorpay).
+
