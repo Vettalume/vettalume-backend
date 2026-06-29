@@ -83,3 +83,22 @@ def test_material_download_entitlement_gate():
             assert c.get(f"/learn/materials/{mid}/download", headers=L).status_code == 200
     finally:
         settings.enforce_entitlements = original
+
+
+def test_admin_material_download_bypasses_entitlement():
+    """Admin preview route returns the file bytes even with enforcement on and no entitlement."""
+    settings.enforce_entitlements = True
+    try:
+        with TestClient(app) as c:
+            A = _admin(c, "mat-admin2@vettalume.test")
+            cid = _make_concept(c, A)
+            pdf = b"%PDF-1.4 " + b"y" * 500
+            mid = c.post(f"/admin/concepts/{cid}/materials",
+                         files={"file": ("sheet.pdf", pdf, "application/pdf")}, headers=A).json()["id"]
+            r = c.get(f"/admin/materials/{mid}/download", headers=A)
+            assert r.status_code == 200
+            assert r.headers["content-type"] == "application/pdf"
+            assert r.content[:5] == b"%PDF-"
+            assert "inline" in r.headers.get("content-disposition", "")
+    finally:
+        settings.enforce_entitlements = False

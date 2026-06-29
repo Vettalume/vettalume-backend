@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .db import SessionLocal
 from .models import Account
-from .services import security
+from .services import security, sessions
 
 
 def get_db():
@@ -38,6 +38,13 @@ def get_current_learner(
     still accepted for dev unless settings.require_jwt is on (then JWT is mandatory)."""
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization.split(" ", 1)[1].strip()
+        # New student auth issues opaque session tokens (sliding 2-day inactivity expiry).
+        if token.startswith("vls_"):
+            acct = sessions.resolve(db, token)
+            if acct is None:
+                raise HTTPException(status_code=401, detail="session expired or invalid")
+            return acct
+        # Otherwise it's a JWT from the existing flows (register / dev-login).
         try:
             payload = security.decode_token(token)
         except ValueError:

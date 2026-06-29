@@ -54,7 +54,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title=settings.app_name, version="0.16.1 (Phase 15 — Razorpay payments; receipt length fix)", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.17.0 (Phase 16 — student signup, email OTP, Google sign-in, sliding sessions)", lifespan=lifespan)
 
 # Dev-only: allow any origin so a separately-hosted frontend can call the API.
 app.add_middleware(

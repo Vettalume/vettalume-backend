@@ -397,6 +397,42 @@ class Subscription(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class EmailOtp(Base):
+    """One pending email-verification code per account. Codes are stored HASHED (never plaintext).
+    `last_sent_at` powers the 30s resend cooldown; `attempts` burns the code after too many wrong tries."""
+    __tablename__ = "email_otps"
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(128))
+    expires_at: Mapped[datetime] = mapped_column(DateTime)              # naive UTC
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_sent_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AuthSession(Base):
+    """A server-side login session. The bearer token IS the id (an opaque random string). Sliding
+    expiry: a session is valid while `now - last_seen_at <= session_inactivity_days`; every request
+    bumps last_seen_at, so 2 idle days auto-logs-out while active use stays signed in indefinitely."""
+    __tablename__ = "auth_sessions"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)        # opaque session token
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class AccountAuth(Base):
+    """Auth metadata that can't go on the existing accounts table (additive-only): which provider the
+    student signed up with, their Google subject id (for linking Google sign-ins), and when they
+    accepted the terms."""
+    __tablename__ = "account_auth"
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(16), default="password")  # password | google
+    google_sub: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    terms_accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class PredictionRecord(Base):
     """One emitted prediction and (once known) its verified outcome. The aggregate over these rows
     IS the Honest Perimeter's published accuracy record: coverage of the bands and mean error."""

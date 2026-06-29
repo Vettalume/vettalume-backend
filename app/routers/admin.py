@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
@@ -876,6 +876,17 @@ async def upload_material(node_id: str, file: UploadFile = File(...),
     db.add(m)
     db.commit()
     return _material_out(m)
+
+
+@router.get("/materials/{mid}/download")
+def admin_download_material(mid: str, db: Session = Depends(get_db)):
+    """Stream a material's bytes for admin preview. Admin-gated at the router level and deliberately
+    NOT entitlement-gated — an admin can view any uploaded material regardless of course access."""
+    m = db.get(models.Material, mid)
+    if m is None:
+        raise HTTPException(404, "no such material")
+    return Response(content=m.data, media_type=m.content_type or "application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{m.filename}"'})
 
 
 @router.delete("/materials/{mid}")

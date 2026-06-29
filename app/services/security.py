@@ -83,3 +83,49 @@ def decode_token(token: str) -> dict:
     if int(payload.get("exp", 0)) < int(time.time()):
         raise ValueError("expired")
     return payload
+
+
+# ---------- password strength ----------
+import re as _re
+import secrets as _secrets
+
+_PW_SPECIAL = _re.compile(r"[^A-Za-z0-9]")
+
+
+def password_problems(pw: str, min_len: int = 8) -> list[str]:
+    """Return a list of unmet requirements (empty list == strong enough). Used to give the user
+    specific, actionable feedback rather than a vague 'weak password'."""
+    problems = []
+    if len(pw or "") < min_len:
+        problems.append(f"at least {min_len} characters")
+    if not _re.search(r"[A-Z]", pw or ""):
+        problems.append("an uppercase letter")
+    if not _re.search(r"[a-z]", pw or ""):
+        problems.append("a lowercase letter")
+    if not _re.search(r"[0-9]", pw or ""):
+        problems.append("a number")
+    if not _PW_SPECIAL.search(pw or ""):
+        problems.append("a special character")
+    return problems
+
+
+# ---------- opaque session tokens ----------
+def new_session_token() -> str:
+    """A high-entropy, URL-safe opaque token. This IS the AuthSession primary key / bearer value."""
+    return "vls_" + _secrets.token_urlsafe(36)
+
+
+# ---------- email OTP (short-lived, rate-limited; stored hashed, never plaintext) ----------
+def new_otp(digits: int = 6) -> str:
+    return "".join(_secrets.choice("0123456789") for _ in range(digits))
+
+
+def hash_otp(code: str) -> str:
+    """Keyed hash of an OTP for at-rest storage. HMAC (not PBKDF2) is fine here: codes are short-lived,
+    attempt-limited, and high-enough entropy that brute force in the window is infeasible."""
+    return hmac.new(settings.jwt_secret.encode("utf-8"), (code or "").encode("utf-8"),
+                    hashlib.sha256).hexdigest()
+
+
+def verify_otp(code: str, stored_hash: str) -> bool:
+    return hmac.compare_digest(hash_otp(code), stored_hash or "")

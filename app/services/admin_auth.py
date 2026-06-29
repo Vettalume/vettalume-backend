@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..config import settings
 from ..deps import get_db
-from . import security
+from . import security, sessions
 
 
 def _admin_email_set() -> set[str]:
@@ -42,15 +42,22 @@ def require_admin(
     if not (authorization and authorization.lower().startswith("bearer ")):
         raise HTTPException(status_code=401, detail="admin login required")
     token = authorization.split(" ", 1)[1].strip()
-    try:
-        payload = security.decode_token(token)
-    except ValueError:
-        raise HTTPException(status_code=401, detail="invalid or expired token")
-    sub = payload.get("sub")
-    try:
-        acc = db.get(models.Account, uuid.UUID(str(sub)))
-    except (ValueError, TypeError):
-        acc = None
+    # New sliding-session tokens are server-side and unforgeable (you can't claim another account's
+    # id, unlike the rejected X-Learner-Id header), so they're safe to accept here.
+    if token.startswith("vls_"):
+        acc = sessions.resolve(db, token)
+        if acc is None:
+            raise HTTPException(status_code=401, detail="session expired or invalid")
+    else:
+        try:
+            payload = security.decode_token(token)
+        except ValueError:
+            raise HTTPException(status_code=401, detail="invalid or expired token")
+        sub = payload.get("sub")
+        try:
+            acc = db.get(models.Account, uuid.UUID(str(sub)))
+        except (ValueError, TypeError):
+            acc = None
     if acc is None:
         raise HTTPException(status_code=401, detail="account not found")
     if not is_admin(db, acc):
