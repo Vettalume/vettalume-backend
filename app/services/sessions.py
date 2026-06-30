@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from sqlalchemy import update
+
 from .. import models
 from ..config import settings
 from . import security
@@ -40,3 +42,16 @@ def revoke(db, token: str) -> None:
     if s is not None and not s.revoked:
         s.revoked = True
         db.commit()
+
+
+def revoke_all(db, account_id, *, keep_token: str | None = None) -> int:
+    """Revoke every live session for an account (e.g. after a password change / "log out everywhere").
+    Pass keep_token to spare the caller's current session. Returns the number of sessions revoked."""
+    stmt = (update(models.AuthSession)
+            .where(models.AuthSession.account_id == account_id, models.AuthSession.revoked == False)  # noqa: E712
+            .values(revoked=True))
+    if keep_token is not None:
+        stmt = stmt.where(models.AuthSession.id != keep_token)
+    result = db.execute(stmt)
+    db.commit()
+    return result.rowcount or 0

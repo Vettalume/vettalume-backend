@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..deps import get_db
 from ..schemas import IngestReport, ItemIn
-from ..services import ingestion, question_bank
+from ..services import html_sanitize, ingestion, question_bank
 from ..services.admin_auth import grant_admin, require_admin, revoke_admin
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -401,9 +401,38 @@ def set_concept_content(node_id: str, body: ContentIn, db: Session = Depends(get
     n = db.get(models.KnowledgeNode, node_id)
     if n is None or n.kind != "concept":
         raise HTTPException(404, f"no concept {node_id!r}")
-    n.theory = {"body": body.body or "", "videos": [v.model_dump() for v in body.videos]}
+    # body may contain HTML — sanitize before storing (it renders into students' browsers).
+    n.theory = {"body": html_sanitize.sanitize_html(body.body or ""),
+                "videos": [v.model_dump() for v in body.videos]}
     db.commit()
     return {"ok": True, "node_id": node_id, "videos": len(body.videos)}
+
+
+@router.post("/concepts/{node_id}/content/html")
+async def upload_concept_html(node_id: str, file: UploadFile = File(...),
+                              db: Session = Depends(get_db)) -> dict:
+    """Upload an .html file as a concept's explanation. The file is read, sanitized (scripts, event
+    handlers, iframes and javascript: URLs removed), and stored; existing video links are preserved.
+    Returns the cleaned HTML so the admin console can preview exactly what students will see.
+
+    Note: images must use full URLs (e.g. https://.../fig.png). Relative paths like <img src="fig.png">
+    point at files on your computer and won't load for students — host images and link them by URL.
+    """
+    n = db.get(models.KnowledgeNode, node_id)
+    if n is None or n.kind != "concept":
+        raise HTTPException(404, f"no concept {node_id!r}")
+    raw = await file.read()
+    if len(raw) > 2_000_000:
+        raise HTTPException(413, "HTML file too large (max 2 MB).")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1", errors="replace")
+    clean = html_sanitize.sanitize_html(text)
+    existing = n.theory or {}
+    n.theory = {"body": clean, "videos": existing.get("videos", [])}
+    db.commit()
+    return {"ok": True, "node_id": node_id, "name": n.name, "chars": len(clean), "body": clean}
 
 
 # ═══════════════════════ per-subtopic quiz: bulk upload (simple sheet) ═══════════════════════

@@ -107,6 +107,71 @@ def test_google_signup_and_relogin(monkeypatch):
         assert r2["account"]["id"] == r["account"]["id"]
 
 
+def _signup_verified(c, box, email="user@s.test", password="Strong@123"):
+    """Sign up + verify a student and return a live session token."""
+    c.post("/auth/signup", json={"full_name": "U Ser", "email": email,
+           "password": password, "accept_terms": True})
+    r = c.post("/auth/verify-email", json={"email": email, "code": box["code"]}).json()
+    return r["access_token"]
+
+
+def test_change_password_rotates_and_revokes_other_sessions(monkeypatch):
+    box = _capture(monkeypatch)
+    with TestClient(app) as c:
+        tok_a = _signup_verified(c, box, email="cp@s.test", password="Strong@123")
+        # a second device logs in -> a second live session for the same account
+        tok_b = c.post("/auth/login", json={"email": "cp@s.test", "password": "Strong@123"}).json()["access_token"]
+        Ha, Hb = {"Authorization": "Bearer " + tok_a}, {"Authorization": "Bearer " + tok_b}
+        assert c.get("/auth/me", headers=Ha).status_code == 200
+        assert c.get("/auth/me", headers=Hb).status_code == 200
+        # change password from device A
+        r = c.post("/auth/change-password", headers=Ha,
+                   json={"current_password": "Strong@123", "new_password": "NewStrong@456"})
+        assert r.status_code == 200 and r.json()["status"] == "password_changed"
+        assert r.json()["other_sessions_revoked"] == 1
+        # device A (the caller) stays signed in; device B is revoked
+        assert c.get("/auth/me", headers=Ha).status_code == 200
+        assert c.get("/auth/me", headers=Hb).status_code == 401
+        # old password no longer works; new one does
+        assert c.post("/auth/login", json={"email": "cp@s.test", "password": "Strong@123"}).status_code == 401
+        assert c.post("/auth/login", json={"email": "cp@s.test", "password": "NewStrong@456"}).status_code == 200
+
+
+def test_change_password_rejects_wrong_current_and_weak_new(monkeypatch):
+    box = _capture(monkeypatch)
+    with TestClient(app) as c:
+        tok = _signup_verified(c, box, email="cpw@s.test", password="Strong@123")
+        H = {"Authorization": "Bearer " + tok}
+        wrong = c.post("/auth/change-password", headers=H,
+                       json={"current_password": "nope", "new_password": "NewStrong@456"})
+        assert wrong.status_code == 403 and wrong.json()["detail"]["error"] == "wrong_password"
+        weak = c.post("/auth/change-password", headers=H,
+                      json={"current_password": "Strong@123", "new_password": "weak"})
+        assert weak.status_code == 400 and weak.json()["detail"]["error"] == "weak_password"
+
+
+def test_change_password_unauthenticated(monkeypatch):
+    _capture(monkeypatch)
+    with TestClient(app) as c:
+        r = c.post("/auth/change-password",
+                   json={"current_password": "x", "new_password": "NewStrong@456"})
+        assert r.status_code == 401
+
+
+def test_logout_all_revokes_others_keeps_caller(monkeypatch):
+    box = _capture(monkeypatch)
+    with TestClient(app) as c:
+        tok_a = _signup_verified(c, box, email="la@s.test", password="Strong@123")
+        tok_b = c.post("/auth/login", json={"email": "la@s.test", "password": "Strong@123"}).json()["access_token"]
+        tok_c = c.post("/auth/login", json={"email": "la@s.test", "password": "Strong@123"}).json()["access_token"]
+        Ha = {"Authorization": "Bearer " + tok_a}
+        r = c.post("/auth/logout-all", headers=Ha)
+        assert r.status_code == 200 and r.json()["sessions_revoked"] == 2
+        assert c.get("/auth/me", headers=Ha).status_code == 200                       # caller kept
+        for t in (tok_b, tok_c):
+            assert c.get("/auth/me", headers={"Authorization": "Bearer " + t}).status_code == 401
+
+
 def test_session_sliding_expiry_and_logout(monkeypatch):
     monkeypatch.setattr(email_svc, "send_welcome", lambda *a, **k: {"dev": True})
     monkeypatch.setattr(google_auth, "verify_id_token",

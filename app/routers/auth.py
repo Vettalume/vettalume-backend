@@ -331,6 +331,39 @@ def google_signin(body: GoogleIn, db: Session = Depends(get_db)) -> dict:
     return _session_response(db, acct)
 
 
+# ----------------------------- change password -----------------------------
+class ChangePasswordIn(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@router.post("/change-password")
+def change_password(body: ChangePasswordIn, authorization: str | None = Header(None),
+                    learner=Depends(get_current_learner), db: Session = Depends(get_db)) -> dict:
+    """Change the signed-in account's password. Verifies the current password, enforces strength on the
+    new one, re-hashes, then revokes all OTHER sessions so a stolen/old token can't outlive the change."""
+    cred = db.get(models.Credential, learner.id)
+    if cred is None:
+        raise HTTPException(400, {"error": "no_password_set",
+                                  "detail": "This account has no password (e.g. Google sign-in)."})
+    if not security.verify_password(body.current_password, cred.password_hash):
+        raise HTTPException(403, {"error": "wrong_password", "detail": "Your current password is incorrect."})
+    problems = security.password_problems(body.new_password, MIN_PASSWORD_LEN)
+    if problems:
+        raise HTTPException(400, {"error": "weak_password",
+                                  "detail": "Your new password needs " + ", ".join(problems) + ".",
+                                  "missing": problems})
+    cred.password_hash = security.hash_password(body.new_password)
+    db.commit()
+    keep = None
+    if authorization and authorization.lower().startswith("bearer "):
+        tok = authorization.split(" ", 1)[1].strip()
+        if tok.startswith("vls_"):
+            keep = tok
+    revoked = sessions.revoke_all(db, learner.id, keep_token=keep)
+    return {"status": "password_changed", "other_sessions_revoked": revoked}
+
+
 # ----------------------------- logout -----------------------------
 @router.post("/logout")
 def logout(authorization: str | None = Header(None), db: Session = Depends(get_db)) -> dict:
@@ -340,3 +373,17 @@ def logout(authorization: str | None = Header(None), db: Session = Depends(get_d
         if tok.startswith("vls_"):
             sessions.revoke(db, tok)
     return {"status": "logged_out"}
+
+
+@router.post("/logout-all")
+def logout_all(authorization: str | None = Header(None),
+               learner=Depends(get_current_learner), db: Session = Depends(get_db)) -> dict:
+    """Revoke every session for the current account ("log out of all devices"). Keeps the caller's own
+    session alive so this request's token stays usable. Use after a password change or suspected compromise."""
+    keep = None
+    if authorization and authorization.lower().startswith("bearer "):
+        tok = authorization.split(" ", 1)[1].strip()
+        if tok.startswith("vls_"):
+            keep = tok
+    revoked = sessions.revoke_all(db, learner.id, keep_token=keep)
+    return {"status": "logged_out_all", "sessions_revoked": revoked}

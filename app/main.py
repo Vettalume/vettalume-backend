@@ -27,6 +27,15 @@ async def lifespan(app: FastAPI):
     from .config import settings
     from .db import SessionLocal, engine
 
+    # Fail fast: never serve traffic in production with a forgeable JWT secret, dev-login enabled, the
+    # spoofable X-Learner-Id header on, or wildcard CORS. In development this list is always empty.
+    problems = settings.production_problems()
+    if problems:
+        raise RuntimeError(
+            "Refusing to start in production with insecure configuration:\n  - "
+            + "\n  - ".join(problems)
+        )
+
     _BOOT_LOCK_KEY = 727202699  # arbitrary app-wide constant
     is_pg = settings.database_url.startswith("postgres")
     lock_conn = None
@@ -54,13 +63,16 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title=settings.app_name, version="0.17.0 (Phase 16 — student signup, email OTP, Google sign-in, sliding sessions)", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.18.1 (Phase 17 — concept HTML: CSS preserved, MathJax preview)", lifespan=lifespan)
 
-# Dev-only: allow any origin so a separately-hosted frontend can call the API.
+# CORS: defaults to "*" for dev convenience; production must set CORS_ORIGINS to explicit origins
+# (production_problems() rejects "*" at boot). Credentials are only enabled when origins are explicit,
+# since "*" + allow_credentials is invalid per the CORS spec and silently breaks credentialed requests.
+_cors_origins = settings.cors_origins_list or ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials="*" not in _cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

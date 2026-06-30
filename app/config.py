@@ -5,6 +5,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     app_name: str = "Vettalume Backend"
+    # "development" (default, dev-friendly) or "production". In production the app fail-fast refuses to
+    # boot with insecure defaults (see production_problems()), so a misconfigured deploy never serves
+    # traffic with a forgeable JWT secret or the spoofable X-Learner-Id header enabled.
+    environment: str = "development"
     # Local dev runs on SQLite with zero config. Docker/prod set DATABASE_URL to Postgres explicitly
     # (see docker-compose.yml), so this default never reaches a real deployment.
     database_url: str = "sqlite+pysqlite:///./vettalume.db"
@@ -54,6 +58,35 @@ class Settings(BaseSettings):
     db_max_overflow: int = 10       # extra burst connections per worker beyond pool_size
     db_pool_timeout: int = 30       # seconds a request waits for a free connection before erroring
     db_pool_recycle: int = 1800     # recycle a connection after N seconds (avoids stale/closed sockets)
+
+    # CORS allowed origins, comma-separated (env CORS_ORIGINS). "*" is convenient for dev but is rejected
+    # in production by production_problems() because "*" + allow_credentials is both invalid (browsers
+    # block it) and unsafe. Set e.g. CORS_ORIGINS="https://app.vettalume.com,https://vettalume.com".
+    cors_origins: str = "*"
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment.strip().lower() == "production"
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    def production_problems(self) -> list[str]:
+        """Insecure settings that must NOT ship to production. Empty list == safe to boot. Checked at
+        startup (main.lifespan) so a misconfigured production deploy fails fast instead of serving."""
+        problems: list[str] = []
+        if not self.is_production:
+            return problems
+        if self.jwt_secret == "dev-insecure-change-me" or len(self.jwt_secret) < 32:
+            problems.append("JWT_SECRET must be set to a strong random value (>=32 chars), not the dev default")
+        if self.dev_mode:
+            problems.append("DEV_MODE must be false (it enables passwordless /auth/dev-login)")
+        if not self.require_jwt:
+            problems.append("REQUIRE_JWT must be true (else the spoofable X-Learner-Id header impersonates any account)")
+        if "*" in self.cors_origins_list:
+            problems.append("CORS_ORIGINS must list explicit origins, not '*' (incompatible with credentialed requests and unsafe)")
+        return problems
 
 
 settings = Settings()
