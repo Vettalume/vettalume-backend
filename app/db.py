@@ -1,5 +1,5 @@
-from sqlalchemy import create_engine, event
-from sqlalchemy.orm import sessionmaker, DeclarativeBase
+from sqlalchemy import create_engine, event, insert
+from sqlalchemy.orm import Session, sessionmaker, DeclarativeBase
 
 from .config import settings
 
@@ -21,6 +21,16 @@ else:
         "pool_timeout": settings.db_pool_timeout,
         "pool_recycle": settings.db_pool_recycle,
     }
+    # Keep pooled connections warm against a managed/remote Postgres (e.g. Neon), which drops idle
+    # connections aggressively. Without TCP keepalives every request re-does the ~350ms TLS+auth
+    # handshake instead of reusing a ~80ms warm connection. (libpq/psycopg2 keepalive params.)
+    if "psycopg2" in settings.database_url or settings.database_url.startswith("postgresql"):
+        connect_args = {
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
+        }
 
 engine = create_engine(
     settings.database_url,
@@ -53,3 +63,22 @@ def init_db() -> None:
     from . import models  # noqa: F401  (register mappers)
 
     Base.metadata.create_all(bind=engine)
+
+
+def bulk_insert(db: Session, model, rows: list[dict], *, batch_size: int = 500) -> int:
+    """Insert many rows fast: each batch is one round trip (executemany), then a single commit.
+
+    Over a remote DB (Neon) this is the difference between minutes and seconds — `db.add()` per row
+    pays ~one network round trip each; batching sends up to `batch_size` rows per trip.
+
+        from app.db import bulk_insert
+        bulk_insert(db, models.Item, [{"id": ..., "stem": ...}, ...])
+
+    `rows` is a list of plain dicts (column name -> value). Returns the number of rows inserted.
+    For upserts / dedupe, filter `rows` before calling (this is a plain INSERT)."""
+    if not rows:
+        return 0
+    for i in range(0, len(rows), batch_size):
+        db.execute(insert(model), rows[i:i + batch_size])
+    db.commit()
+    return len(rows)

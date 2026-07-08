@@ -15,8 +15,10 @@ Postgres `max_connections` (the prod compose raises it to 200) or put pgbouncer 
 import multiprocessing
 import os
 
-# bind / sockets
-bind = os.getenv("BIND", "0.0.0.0:8000")
+# bind / sockets. Platforms like Render/Heroku/Fly inject the port to listen on via $PORT, so honour
+# it: explicit BIND wins, else bind 0.0.0.0:$PORT when the platform set one, else the local default.
+_port = os.getenv("PORT")
+bind = os.getenv("BIND") or (f"0.0.0.0:{_port}" if _port else "0.0.0.0:8000")
 
 # Worker processes. One uvicorn worker per core is the right default for an async server; each worker
 # is a single event loop, and FastAPI runs the sync DB endpoints in a per-worker threadpool, so one

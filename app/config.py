@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,15 +36,26 @@ class Settings(BaseSettings):
     otp_resend_cooldown_seconds: int = 30       # minimum gap between OTP sends (the 30s resend timer)
     otp_max_attempts: int = 5                   # wrong tries before a code is burned
 
-    # SMTP (env SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASSWORD / SMTP_FROM).
-    # Empty host => DEV MODE: emails (including the OTP) are printed to the server console instead of
-    # sent, so the whole signup flow is testable locally with no mail provider.
+    # Email transport, best → fallback (see services/email.py):
+    #   1. Resend  — set RESEND_API_KEY (production path; HTTP API, no SMTP egress needed).
+    #   2. SMTP    — set SMTP_HOST (any SMTP provider / self-hosted).
+    #   3. neither — DEV MODE: emails (including the OTP) are printed to the server console so the
+    #                whole signup flow is testable locally with no mail provider.
+    # RESEND_API_KEY is a re_... key from resend.com. The sender domain must be verified in Resend;
+    # for a quick test with no domain, use MAIL_FROM="Vettalume <onboarding@resend.dev>".
+    resend_api_key: str = ""
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_user: str = ""
     smtp_password: str = ""
-    smtp_from: str = "Vettalume <no-reply@vettalume.com>"
+    smtp_from: str = "Vettalume <no-reply@vettalume.com>"   # legacy alias; MAIL_FROM overrides it
+    mail_from_addr: str = Field(default="", validation_alias="MAIL_FROM")  # preferred. Empty => smtp_from
     smtp_starttls: bool = True
+
+    @property
+    def mail_from(self) -> str:
+        """The From header used by every transport. MAIL_FROM wins; otherwise the legacy SMTP_FROM."""
+        return self.mail_from_addr or self.smtp_from
 
     # Google sign-in (env GOOGLE_CLIENT_ID). Empty => /auth/google returns a clear "not configured".
     google_client_id: str = ""

@@ -10,8 +10,8 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .db import init_db
-from .routers import (account, admin, analysis, auth, billing, catalog, diagnosis, ingest, learn,
-                      mocks, payments, practice, psychometrics, review)
+from .routers import (account, admin, analysis, auth, billing, catalog, diagnosis, diagnostic, ingest, learn,
+                      mocks, mocks_catalog, payments, practice, psychometrics, review)
 from .seed import seed_if_empty
 
 
@@ -63,7 +63,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title=settings.app_name, version="0.18.1 (Phase 17 — concept HTML: CSS preserved, MathJax preview)", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.19.0 (Phase 18 — diagnostic test flow)", lifespan=lifespan)
 
 # CORS: defaults to "*" for dev convenience; production must set CORS_ORIGINS to explicit origins
 # (production_problems() rejects "*" at boot). Credentials are only enabled when origins are explicit,
@@ -85,8 +85,10 @@ app.include_router(learn.router)
 app.include_router(analysis.router)
 app.include_router(psychometrics.router)
 app.include_router(mocks.router)
+app.include_router(mocks_catalog.router)
 app.include_router(diagnosis.router)
 app.include_router(diagnosis.plan_router)
+app.include_router(diagnostic.router)
 app.include_router(billing.router)
 app.include_router(review.router)
 app.include_router(review.honesty_router)

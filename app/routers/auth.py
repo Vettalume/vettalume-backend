@@ -259,6 +259,112 @@ def resend_otp(body: EmailIn, db: Session = Depends(get_db)) -> dict:
     return {"status": "otp_sent", "email": acct.email, "dev_mode": delivery.get("dev", False)}
 
 
+# ----------------------------- forgot / reset password (new) -----------------------------
+class ForgotPasswordIn(BaseModel):
+    email: str
+    @field_validator("email")
+    @classmethod
+    def _e(cls, v): return _norm(v)
+
+
+@router.post("/forgot-password")
+def forgot_password(body: ForgotPasswordIn, db: Session = Depends(get_db)) -> dict:
+    """Start a password reset: email an OTP to the address. Always returns ok (no account enumeration);
+    an OTP is only actually sent when the email belongs to a password account."""
+    acct = db.scalar(select(models.Account).where(models.Account.email == body.email))
+    dev = False
+    if acct is not None and db.get(models.Credential, acct.id) is not None:
+        delivery = _issue_otp(db, acct)
+        dev = delivery.get("dev", False)
+    return {"status": "otp_sent", "email": body.email, "dev_mode": dev}
+
+
+class ResetPasswordIn(BaseModel):
+    email: str
+    code: str
+    new_password: str
+    @field_validator("email")
+    @classmethod
+    def _e(cls, v): return _norm(v)
+
+
+@router.post("/reset-password")
+def reset_password(body: ResetPasswordIn, db: Session = Depends(get_db)) -> dict:
+    """Verify the reset OTP and set a new password. On success returns a fresh session token."""
+    problems = security.password_problems(body.new_password, MIN_PASSWORD_LEN)
+    if problems:
+        raise HTTPException(400, {"error": "weak_password",
+                                  "detail": "Your password needs " + ", ".join(problems) + ".",
+                                  "missing": problems})
+    acct = db.scalar(select(models.Account).where(models.Account.email == body.email))
+    row = db.get(models.EmailOtp, acct.id) if acct else None
+    if acct is None or row is None:
+        raise HTTPException(404, {"error": "no_pending_reset",
+                                  "detail": "No reset is pending for this email. Request a new code."})
+    now = datetime.utcnow()
+    if now > row.expires_at:
+        raise HTTPException(400, {"error": "otp_expired", "detail": "This code has expired. Request a new one."})
+    if row.attempts >= settings.otp_max_attempts:
+        raise HTTPException(429, {"error": "too_many_attempts",
+                                  "detail": "Too many incorrect attempts. Request a new code."})
+    if not security.verify_otp(body.code, row.code_hash):
+        row.attempts += 1
+        db.commit()
+        raise HTTPException(400, {"error": "otp_incorrect",
+                                  "attempts_left": max(0, settings.otp_max_attempts - row.attempts),
+                                  "detail": "That code is incorrect."})
+    cred = db.get(models.Credential, acct.id)
+    if cred is None:
+        db.add(models.Credential(account_id=acct.id, password_hash=security.hash_password(body.new_password)))
+    else:
+        cred.password_hash = security.hash_password(body.new_password)
+    db.delete(row)
+    db.commit()
+    return _session_response(db, acct)
+
+
+# ----------------------------- self-service profile (new) -----------------------------
+def _profile_out(learner: "models.Account", p: "models.StudentProfile") -> dict:
+    return {"email": learner.email, "full_name": learner.display_name or "",
+            "phone": p.phone or "", "city": p.city or "",
+            "about": p.about or "", "target_exam": p.target_exam or ""}
+
+
+@router.get("/profile")
+def get_profile(learner=Depends(get_current_learner), db: Session = Depends(get_db)) -> dict:
+    """The signed-in student's own editable profile."""
+    p = _profile(db, learner)
+    db.commit()
+    return _profile_out(learner, p)
+
+
+class ProfileUpdateIn(BaseModel):
+    full_name: str | None = None
+    phone: str | None = None
+    city: str | None = None
+    about: str | None = None
+    target_exam: str | None = None
+
+
+@router.patch("/profile")
+def update_profile(body: ProfileUpdateIn, learner=Depends(get_current_learner),
+                   db: Session = Depends(get_db)) -> dict:
+    """Save the signed-in student's profile fields (persists to the accounts / student_profiles tables)."""
+    if body.full_name is not None and body.full_name.strip():
+        learner.display_name = body.full_name.strip()
+    p = _profile(db, learner)
+    if body.phone is not None:
+        p.phone = body.phone.strip() or None
+    if body.city is not None:
+        p.city = body.city.strip() or None
+    if body.about is not None:
+        p.about = body.about.strip() or None
+    if body.target_exam is not None:
+        p.target_exam = body.target_exam.strip() or None
+    db.commit()
+    return {"status": "saved", **_profile_out(learner, p)}
+
+
 class ChangeEmailIn(BaseModel):
     email: str
     new_email: str

@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..config import settings
 from ..deps import get_current_learner, get_db
-from ..services import billing, payments
+from ..services import billing, email as email_svc, payments
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 
@@ -124,6 +124,11 @@ def _grant_for_order(db: Session, po: "models.PaymentOrder", payment_id: str | N
     po.status, po.rp_payment_id, po.granted = "paid", payment_id, True
     db.commit()
     grant = billing.grant_subscription(db, account, plan, order_id=po.id, rp_payment_id=payment_id)
+    # Best-effort receipt — a mail outage must not undo a captured payment (see email._best_effort).
+    email_svc.send_payment_confirmation(
+        account.email, account.display_name or "there",
+        plan_name=plan.name, amount=po.amount_paise / 100, currency=po.currency,
+        months=grant.get("months", 0), access=grant.get("granted", []), payment_id=payment_id)
     return {"order_id": po.id, **grant}
 
 

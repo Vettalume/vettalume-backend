@@ -20,12 +20,27 @@ def chapter(exam: str, topic: Optional[str] = None, topic_id: Optional[str] = No
     """Full per-chapter analytics for the current learner: KPIs, difficulty spread, improvement
     over time, learning-vs-practice split, strongest/weakest concepts, MAB-recommended actions,
     and the subtopic breakdown. Identify the chapter by `topic` (name) or `topic_id`."""
+    exam = (exam or "").upper()
     if db.get(models.Exam, exam) is None:
         raise HTTPException(404, f"unknown exam '{exam}'")
     node = analytics.resolve_chapter(db, exam, topic, topic_id)
     if node is None:
         raise HTTPException(404, f"no chapter '{topic or topic_id}' in exam '{exam}'")
     return analytics.chapter_analysis(db, learner, node)
+
+
+@router.get("/chapter/attempts")
+def chapter_attempts(exam: str, topic: Optional[str] = None, topic_id: Optional[str] = None,
+                     learner=Depends(get_current_learner), db: Session = Depends(get_db)) -> dict:
+    """The questions the learner has solved in this chapter (subtopic quizzes + topic practice),
+    with their answer, correctness, the correct answer, and the solution — powers 'revisit'."""
+    exam = (exam or "").upper()
+    if db.get(models.Exam, exam) is None:
+        raise HTTPException(404, f"unknown exam '{exam}'")
+    node = analytics.resolve_chapter(db, exam, topic, topic_id)
+    if node is None:
+        raise HTTPException(404, f"no chapter '{topic or topic_id}' in exam '{exam}'")
+    return analytics.chapter_attempts(db, learner, node)
 
 
 @router.post("/simulate")

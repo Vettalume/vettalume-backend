@@ -56,6 +56,38 @@ def select_problem(db: Session, learner_id: uuid.UUID, concept_id: str, edge: fl
     return candidates[0]
 
 
+def practice_batch(db: Session, learner: models.Account, topic: models.KnowledgeNode,
+                   limit: int = 15, now: datetime | None = None) -> dict:
+    """A batch of practice questions for one chapter, delivered as a set (like a sectional mock) so
+    the learner can work a palette of questions instead of one-at-a-time. Ordering mirrors the
+    problem bandit: FRESH (never-answered) items first, each near its concept's MAPLE edge; once the
+    fresh pool is dry, already-seen items follow as spaced review. Difficulty/answer/solution are NOT
+    included — feedback comes from POST /learn/answer after each submission."""
+    now = now or engine.now_utc()
+    concepts = kg._concepts_of_topic(db, topic.id)
+    expo = _exposure_detail(db, learner.id)
+
+    scored: list[tuple[int, float, str, models.Item]] = []
+    for c in concepts:
+        edge = kg.concept_state(db, learner.id, c, now).edge
+        for it in eligible_items(db, learner.id, context="practice", concept_node_id=c.id):
+            seen = expo.get(it.item_id, (0, None))[0]
+            scored.append((0 if seen == 0 else 1,
+                           -engine.problem_weight(it.difficulty_d, edge), it.item_id, it))
+    scored.sort(key=lambda t: (t[0], t[1], t[2]))
+    batch = [it for _, _, _, it in scored[:max(1, limit)]]
+
+    return {
+        "exam": topic.exam_code,
+        "chapter": {"id": topic.id, "name": topic.name, "section": kg._section_key_of(db, topic)},
+        "questions": [{
+            "item_id": it.item_id, "stem": it.stem, "options": it.options or [],
+            "format": it.format, "num_options": it.num_options,
+            "difficulty": it.difficulty_d, "concept_id": it.concept_node_id,
+        } for it in batch],
+    }
+
+
 def next_step(db: Session, learner: models.Account, exam: str,
               section_key: str | None = None, now: datetime | None = None,
               exclude_item_ids=frozenset()) -> dict:
@@ -126,6 +158,7 @@ def answer(db: Session, learner: models.Account, item: models.Item, *, answer_gi
     return {
         "correct": correct,
         "solution": item.solution,
+        "correct_answer": item.correct_answer,
         "concept": item.concept_node_id,
         "mastery": round(state.mastery, 4),
         "breakdown": {"P": round(state.performance_p, 4), "D": round(state.difficulty_score, 4),

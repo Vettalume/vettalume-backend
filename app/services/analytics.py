@@ -20,6 +20,11 @@ from . import engine, knowledge_graph as kg
 # Difficulty bands D1..D5 == authored difficulty -2..2
 _BANDS = [(-2, "D1"), (-1, "D2"), (0, "D3"), (1, "D4"), (2, "D5")]
 
+# A subtopic counts as "learnt" once its MAB mastery crosses this bar. Deliberately a touch below
+# the "mastered" bar (engine.H = 0.74, which is attempts-gated): "learnt" = you can do it,
+# "mastered" = you've proven it across the difficulty ladder.
+LEARNT_THRESHOLD = 0.70
+
 
 def _hms(seconds: float) -> str:
     s = int(seconds)
@@ -55,14 +60,20 @@ def chapter_analysis(db: Session, learner: models.Account, topic: models.Knowled
                models.Item.concept_node_id.in_(concept_ids or ["__none__"]))
         .order_by(models.Response.created_at)
     ).all()
-    responses = [(r, cid) for r, cid in rows]
+    all_responses = [(r, cid) for r, cid in rows]
+    # The learner-facing "questions answered / accuracy / difficulty" numbers count LEARNING work
+    # only — i.e. the subtopic quizzes and topic practice (both context="practice"), which come from
+    # the same item pool. Scored-mock responses have their own analysis and are excluded here.
+    responses = [(r, cid) for r, cid in all_responses
+                 if r.context == models.Context.practice.value]
     total = len(responses)
     total_correct = sum(1 for r, _ in responses if r.correct)
 
     # ---- per-concept live state (mastery / learned / edge) ----
     cstates = {c.id: kg.concept_state(db, learner.id, c, now) for c in concepts}
     topic_mastery = kg.topic_mastery(db, learner.id, topic, now)
-    learnt = sum(1 for c in concepts if cstates[c.id].learned)
+    # "Topics learnt" = subtopics whose MAB mastery has crossed the learnt bar (70%).
+    learnt = sum(1 for c in concepts if cstates[c.id].mastery >= LEARNT_THRESHOLD)
 
     # ---- KPIs ----
     kpis = {
@@ -127,6 +138,7 @@ def chapter_analysis(db: Session, learner: models.Account, topic: models.Knowled
         "id": c.id, "name": c.name,
         "mastery": round(cstates[c.id].mastery, 4),
         "learned": cstates[c.id].learned, "mastered": cstates[c.id].mastered,
+        "learnt": cstates[c.id].mastery >= LEARNT_THRESHOLD,
         "attempts": cstates[c.id].attempts, "accuracy": _acc(c.id),
         "edge": round(cstates[c.id].edge, 2),
     } for c in concepts]
@@ -135,7 +147,7 @@ def chapter_analysis(db: Session, learner: models.Account, topic: models.Knowled
     actions = _recommended_actions(db, learner, topic, cstates, _acc, now)
 
     # ---- topic practice test: last mock-context batch in this chapter ----
-    practice_test = _last_practice_test(responses)
+    practice_test = _last_practice_test(all_responses)
 
     return {
         "exam": topic.exam_code,
@@ -150,8 +162,56 @@ def chapter_analysis(db: Session, learner: models.Account, topic: models.Knowled
         "recommended_actions": actions,
         "practice_test": practice_test,
         "mastery_threshold": round(engine.H, 4),
+        "learnt_threshold": LEARNT_THRESHOLD,
         "subtopics": subtopics,
     }
+
+
+def chapter_attempts(db: Session, learner: models.Account, topic: models.KnowledgeNode) -> dict:
+    """Every question the learner has solved in this chapter through the subtopic quizzes and topic
+    practice (context="practice"), newest attempt per item, so they can revisit what they answered —
+    their answer, whether it was right, the correct answer, and the worked solution."""
+    concepts = kg._concepts_of_topic(db, topic.id)
+    concept_ids = [c.id for c in concepts]
+    name_by_id = {c.id: c.name for c in concepts}
+
+    rows = db.execute(
+        select(models.Response, models.Item)
+        .join(models.Item, models.Response.item_id == models.Item.item_id)
+        .where(models.Response.learner_id == learner.id,
+               models.Item.concept_node_id.in_(concept_ids or ["__none__"]),
+               models.Response.context == models.Context.practice.value)
+        .order_by(models.Response.created_at.desc())
+    ).all()
+
+    seen: set[str] = set()
+    attempts_by_item: dict[str, int] = defaultdict(int)
+    for r, it in rows:
+        attempts_by_item[it.item_id] += 1
+    out = []
+    for r, it in rows:  # newest first; keep only the latest attempt per item
+        if it.item_id in seen:
+            continue
+        seen.add(it.item_id)
+        out.append({
+            "item_id": it.item_id,
+            "concept_id": it.concept_node_id,
+            "concept": name_by_id.get(it.concept_node_id, ""),
+            "format": it.format,
+            "difficulty": it.difficulty_d,
+            "stem": it.stem,
+            "options": it.options or [],
+            "correct_answer": it.correct_answer,
+            "solution": it.solution or "",
+            "your_answer": r.answer_given,
+            "correct": bool(r.correct),
+            "attempts": attempts_by_item[it.item_id],
+            "answered_at": r.created_at.isoformat(),
+        })
+    out.reverse()  # chronological for display (first-solved first)
+    return {"exam": topic.exam_code,
+            "chapter": {"id": topic.id, "name": topic.name, "section": kg._section_key_of(db, topic)},
+            "attempts": out}
 
 
 def _improvement_over_time(responses, current_mastery, now, buckets: int = 8) -> dict:

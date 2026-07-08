@@ -1,0 +1,34 @@
+# Render Blueprint — one service: the FastAPI backend, built from the Dockerfile.
+# In the Render dashboard: New +  ->  Blueprint  ->  pick this repo. It reads this file, then you
+# fill the secret env vars (marked sync:false) once. Render injects $PORT; gunicorn_conf.py binds it.
+#
+# QUICK PRIVATE-DEMO MODE: ENVIRONMENT=development keeps the passwordless /auth/dev-login on and lets
+# CORS stay "*", so teammates can log in with no email setup. Flip ENVIRONMENT=production later (then
+# you MUST set DEV_MODE=false, an explicit CORS_ORIGINS, and a strong JWT_SECRET — the app fail-fasts
+# otherwise).
+services:
+  - type: web
+    name: vettalume-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: ENVIRONMENT
+        value: development
+      - key: DEV_MODE
+        value: "true"
+      - key: WEB_CONCURRENCY
+        value: "2"
+      # Secrets — set these in the Render dashboard (they are NOT stored in git):
+      - key: DATABASE_URL      # the existing Neon URL: postgresql+psycopg2://...?sslmode=require
+        sync: false
+      - key: JWT_SECRET        # any long random string
+        sync: false
+      - key: RESEND_API_KEY    # optional in dev mode (dev-login needs no email)
+        sync: false
+      - key: MAIL_FROM
+        sync: false
+      - key: GOOGLE_CLIENT_ID  # optional; only needed for Google sign-in
+        sync: false

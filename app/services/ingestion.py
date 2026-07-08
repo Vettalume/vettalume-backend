@@ -65,10 +65,19 @@ def ingest_items(db: Session, rows: list[ItemIn]) -> IngestReport:
         return IngestReport(status="rejected", received=len(rows), errors=errors)
 
     inserted = updated = unchanged = 0
+    # Pre-load existing items in one query (chunked) instead of db.get() per row — that per-row
+    # lookup was an N+1 that cost ~one network round trip per item over a remote DB (Neon).
+    existing_by_id: dict = {}
+    batch_ids = [row.item_id for row, _ in resolved]
+    for j in range(0, len(batch_ids), 1000):
+        chunk = batch_ids[j:j + 1000]
+        for it in db.scalars(select(models.Item).where(models.Item.item_id.in_(chunk))).all():
+            existing_by_id[it.item_id] = it
+
     for row, sec in resolved:
         h = _content_hash(row)
         tb = row.time_benchmark_s if row.time_benchmark_s is not None else BENCH.get(row.difficulty_d)
-        existing = db.get(models.Item, row.item_id)
+        existing = existing_by_id.get(row.item_id)
 
         if existing is None:
             db.add(models.Item(

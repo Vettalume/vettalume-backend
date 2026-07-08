@@ -23,12 +23,26 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from .. import models
+from ..config import settings
 from ..deps import get_db
 from ..schemas import IngestReport, ItemIn
 from ..services import html_sanitize, ingestion, question_bank
 from ..services.admin_auth import grant_admin, require_admin, revoke_admin
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
+
+
+@router.post("/seed-demo-content")
+def seed_demo_content(db: Session = Depends(get_db)) -> dict:
+    """Dev-only: (re)seed the CAT/GMAT/GRE learning tree (sections -> chapters -> subtopics -> quiz).
+    Runs inside the app so it uses the warm connection pool (avoids Neon control-plane throttling on
+    fresh connections). Admin-gated + dev_mode-gated."""
+    if not settings.dev_mode:
+        raise HTTPException(403, "seeding is disabled outside dev_mode")
+    from scripts.seed_demo_content import run as _seed_run
+
+    counts = _seed_run(db)
+    return {"ok": True, **counts}
 
 
 # ───────────────────────── whoami ─────────────────────────
@@ -583,12 +597,17 @@ def _sync_enrollments(db: Session, account_id, exams) -> None:
             db.delete(ent)
 
 
-def _student_out(db: Session, a: "models.Account", admin_ids=None) -> dict:
-    """The admin console's exact student shape (camelCase)."""
+def _student_out(db: Session, a: "models.Account", admin_ids=None, *,
+                 profile=None, ents=None, prefetched=False) -> dict:
+    """The admin console's exact student shape (camelCase).
+
+    Pass prefetched=True with `profile`/`ents` (from a batched query) to avoid a per-student round
+    trip — critical over a remote DB, where the N+1 pattern is the main source of slowness."""
     if admin_ids is None:
         admin_ids = {x.account_id for x in db.scalars(select(models.AdminUser)).all()}
-    p = db.get(models.StudentProfile, a.id)
-    ents = db.scalars(select(models.Entitlement).where(models.Entitlement.account_id == a.id)).all()
+    p = profile if prefetched else db.get(models.StudentProfile, a.id)
+    ents = ents if prefetched else db.scalars(
+        select(models.Entitlement).where(models.Entitlement.account_id == a.id)).all()
     pay = (p.payment if (p and p.payment) else {}) or {}
     joined = (p.joined if (p and p.joined) else None) or (
         a.created_at.date().isoformat() if getattr(a, "created_at", None) else None)
@@ -622,10 +641,22 @@ def list_students(q: Optional[str] = None, limit: int = 200, db: Session = Depen
     if q:
         query = query.where(func.lower(models.Account.email).like(f"%{q.lower()}%"))
     accts = db.scalars(query.limit(limit)).all()
+    ids = [a.id for a in accts]
     admin_ids = {x.account_id for x in db.scalars(select(models.AdminUser)).all()}
-    deleted_ids = {p.account_id for p in db.scalars(
-        select(models.StudentProfile).where(models.StudentProfile.deleted.is_(True))).all()}
-    out = [_student_out(db, a, admin_ids) for a in accts if a.id not in deleted_ids]
+    # Batch the per-student data into 2 queries instead of 2*N (the N+1 that made this slow on Neon).
+    profiles = {}
+    ents_by: dict = {}
+    if ids:
+        for p in db.scalars(select(models.StudentProfile).where(models.StudentProfile.account_id.in_(ids))).all():
+            profiles[p.account_id] = p
+        for e in db.scalars(select(models.Entitlement).where(models.Entitlement.account_id.in_(ids))).all():
+            ents_by.setdefault(e.account_id, []).append(e)
+    out = [
+        _student_out(db, a, admin_ids, profile=profiles.get(a.id),
+                     ents=ents_by.get(a.id, []), prefetched=True)
+        for a in accts
+        if not (profiles.get(a.id) and profiles[a.id].deleted)
+    ]
     return {"count": len(out), "students": out}
 
 
@@ -985,8 +1016,8 @@ def list_mocks(exam: str, type: Optional[str] = None, db: Session = Depends(get_
 
 @router.post("/mocks")
 def create_mock(body: MockCreateIn, db: Session = Depends(get_db)) -> dict:
-    if body.type not in ("sectional", "full"):
-        raise HTTPException(400, "type must be 'sectional' or 'full'")
+    if body.type not in ("sectional", "full", "diagnostic"):
+        raise HTTPException(400, "type must be 'sectional', 'full', or 'diagnostic'")
     if db.get(models.Exam, body.exam) is None:
         raise HTTPException(404, f"no exam {body.exam!r}")
     keys = [s.key for s in db.scalars(select(models.Section).where(

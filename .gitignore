@@ -5,3 +5,4 @@ __pycache__/
 *.db
 openapi.json
 package-lock.json
+.claude/

@@ -9,3 +9,4 @@ httpx==0.28.1
 pytest==8.3.4
 redis==5.2.1
 eval_type_backport==0.2.2 ; python_version < "3.10"
+psycopg2-binary>=2.9

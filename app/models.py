@@ -217,6 +217,8 @@ class LearnerNodeState(Base):
     mastery: Mapped[float] = mapped_column(Float, default=0.0)
     # Phase 1 stores bandit weights / reward history / MCM traces here as JSON.
     bandit_state: Mapped[Optional[dict]] = mapped_column(JSONType, nullable=True)
+    # learning-page engagement signals for the subtopic progress %: {"read": bool, "watched": bool}
+    engagement: Mapped[Optional[dict]] = mapped_column(JSONType, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -517,6 +519,9 @@ class StudentProfile(Base):
 
     account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id"), primary_key=True)
     phone: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    city: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)       # self-service profile
+    about: Mapped[Optional[str]] = mapped_column(String(2000), nullable=True)     # self-service profile
+    target_exam: Mapped[Optional[str]] = mapped_column(String(40), nullable=True) # self-service profile
     status: Mapped[str] = mapped_column(String(16), default="active")        # active | inactive
     reg_type: Mapped[str] = mapped_column(String(16), default="registered")  # registered|trial|paid
     purchased_course: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
@@ -568,3 +573,21 @@ class Mock(Base):
     instructions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     sections: Mapped[list] = mapped_column(JSONType, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DiagnosticAttempt(Base):
+    """One diagnostic attempt per learner per exam — the UNIQUE constraint IS the once-only gate.
+    Stores the submitted answers and the per-section ability the diagnostic produced, so the result
+    is reproducible and the lock survives restarts. The diagnostic paper itself is a Mock of
+    type='diagnostic'; this row records that a given learner has taken it."""
+    __tablename__ = "diagnostic_attempts"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    learner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    exam_code: Mapped[str] = mapped_column(String(16), index=True)
+    mock_id: Mapped[str] = mapped_column(String(40))                          # the diagnostic Mock taken
+    status: Mapped[str] = mapped_column(String(16), default="in_progress")    # in_progress | completed
+    answers: Mapped[dict] = mapped_column(JSONType, default=dict)             # {question_id: selected_index}
+    section_ability: Mapped[dict] = mapped_column(JSONType, default=dict)     # {section: {theta, se, band, raw, total}}
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    __table_args__ = (UniqueConstraint("learner_id", "exam_code", name="uq_diagnostic_once"),)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -7,9 +9,25 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..deps import get_current_learner, get_db
 from ..schemas import AnswerIn, AnswerOut, ItemPublic, NodeStateOut, StateOut
+from ..services import analytics, learning
 from ..services.state import eligible_items, node_attempt_count, record_response
 
 router = APIRouter(prefix="/practice", tags=["practice"])
+
+
+@router.get("/session")
+def practice_session(exam: str, topic: Optional[str] = None, topic_id: Optional[str] = None,
+                     limit: int = 15, learner=Depends(get_current_learner),
+                     db: Session = Depends(get_db)) -> dict:
+    """A set of practice questions for one chapter, delivered like a sectional mock (a palette of
+    questions to work through). Identify the chapter by `topic` (name) or `topic_id`."""
+    exam = (exam or "").upper()
+    if db.get(models.Exam, exam) is None:
+        raise HTTPException(404, f"unknown exam '{exam}'")
+    node = analytics.resolve_chapter(db, exam, topic, topic_id)
+    if node is None:
+        raise HTTPException(404, f"no chapter '{topic or topic_id}' in exam '{exam}'")
+    return learning.practice_batch(db, learner, node, limit=limit)
 
 
 @router.get("/next", response_model=ItemPublic)
