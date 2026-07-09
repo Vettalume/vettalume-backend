@@ -197,19 +197,49 @@ def del_prereq(body: PrereqIn, db: Session = Depends(get_db)) -> dict:
 
 
 @router.delete("/nodes/{node_id}")
-def delete_node(node_id: str, db: Session = Depends(get_db)) -> dict:
+def delete_node(node_id: str, cascade: bool = False, db: Session = Depends(get_db)) -> dict:
+    """Delete a topic/concept node. Without ``cascade`` the node must be empty (no child concepts,
+    no items) — the safe default. With ``cascade=1`` it removes the whole subtree in one shot: every
+    descendant concept, all their items (plus those items' responses/exposures), attached materials,
+    per-learner state and prerequisite edges. This is what the content portal's "delete chapter /
+    subtopic" uses so an admin can remove authored content that already has questions."""
     n = db.get(models.KnowledgeNode, node_id)
     if n is None:
         raise HTTPException(404, f"no node {node_id!r}")
-    if db.scalar(select(models.KnowledgeNode).where(models.KnowledgeNode.parent_id == node_id)):
-        raise HTTPException(409, "node has child concepts — delete or reparent them first")
-    if db.scalar(select(models.Item).where(models.Item.concept_node_id == node_id)):
-        raise HTTPException(409, "node has items — delete/retire them first")
+
+    children = db.scalars(
+        select(models.KnowledgeNode).where(models.KnowledgeNode.parent_id == node_id)).all()
+
+    if not cascade:
+        if children:
+            raise HTTPException(409, "node has child concepts — delete or reparent them first")
+        if db.scalar(select(models.Item).where(models.Item.concept_node_id == node_id)):
+            raise HTTPException(409, "node has items — delete/retire them first")
+        db.execute(delete(models.PrereqEdge).where(
+            (models.PrereqEdge.node_id == node_id) | (models.PrereqEdge.prereq_node_id == node_id)))
+        db.delete(n)
+        db.commit()
+        return {"ok": True, "deleted": node_id}
+
+    # cascade: this node + all descendant concepts, deleting dependents in FK-safe order
+    node_ids = [node_id] + [c.id for c in children]
+    item_ids = list(db.scalars(
+        select(models.Item.item_id).where(models.Item.concept_node_id.in_(node_ids))).all())
+    if item_ids:
+        db.execute(delete(models.Response).where(models.Response.item_id.in_(item_ids)))
+        db.execute(delete(models.Exposure).where(models.Exposure.item_id.in_(item_ids)))
+        db.execute(delete(models.Item).where(models.Item.item_id.in_(item_ids)))
+    db.execute(delete(models.Material).where(models.Material.node_id.in_(node_ids)))
+    db.execute(delete(models.LearnerNodeState).where(models.LearnerNodeState.node_id.in_(node_ids)))
     db.execute(delete(models.PrereqEdge).where(
-        (models.PrereqEdge.node_id == node_id) | (models.PrereqEdge.prereq_node_id == node_id)))
+        models.PrereqEdge.node_id.in_(node_ids) | models.PrereqEdge.prereq_node_id.in_(node_ids)))
+    for c in children:          # children reference this node via parent_id — remove them first
+        db.delete(c)
+    db.flush()
     db.delete(n)
     db.commit()
-    return {"ok": True, "deleted": node_id}
+    return {"ok": True, "deleted": node_id, "cascade": True,
+            "concepts_removed": len(children), "items_removed": len(item_ids)}
 
 
 class NodeRenameIn(BaseModel):
