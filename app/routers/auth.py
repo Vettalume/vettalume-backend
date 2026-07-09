@@ -143,7 +143,13 @@ def _issue_otp(db: Session, acct: models.Account, *, cooldown: bool = False) -> 
         row.expires_at = now + timedelta(seconds=settings.otp_ttl_seconds)
         row.attempts, row.last_sent_at = 0, now
     db.commit()
-    return email_svc.send_otp(acct.email, acct.display_name or "there", code)
+    delivery = email_svc.send_otp(acct.email, acct.display_name or "there", code)
+    # In dev the email isn't actually sent (services.email.send_email short-circuits), so surface the
+    # code back to the client so the signup UI can show it — no mail provider or DNS needed. dev_mode
+    # is force-disabled in production by production_problems(), so this never leaks a real OTP live.
+    if settings.dev_mode and isinstance(delivery, dict):
+        delivery = {**delivery, "code": code}
+    return delivery
 
 
 class SignupIn(BaseModel):
@@ -200,7 +206,8 @@ def signup(body: SignupIn, db: Session = Depends(get_db)) -> dict:
     db.commit()
 
     delivery = _issue_otp(db, acct)
-    return {"status": "otp_sent", "email": acct.email, "dev_mode": delivery.get("dev", False)}
+    return {"status": "otp_sent", "email": acct.email, "dev_mode": delivery.get("dev", False),
+            "otp": delivery.get("code")}
 
 
 class VerifyEmailIn(BaseModel):
@@ -256,7 +263,8 @@ def resend_otp(body: EmailIn, db: Session = Depends(get_db)) -> dict:
     if prof is not None and prof.verified:
         raise HTTPException(400, {"error": "already_verified", "detail": "This email is already verified."})
     delivery = _issue_otp(db, acct, cooldown=True)
-    return {"status": "otp_sent", "email": acct.email, "dev_mode": delivery.get("dev", False)}
+    return {"status": "otp_sent", "email": acct.email, "dev_mode": delivery.get("dev", False),
+            "otp": delivery.get("code")}
 
 
 # ----------------------------- forgot / reset password (new) -----------------------------
@@ -272,11 +280,11 @@ def forgot_password(body: ForgotPasswordIn, db: Session = Depends(get_db)) -> di
     """Start a password reset: email an OTP to the address. Always returns ok (no account enumeration);
     an OTP is only actually sent when the email belongs to a password account."""
     acct = db.scalar(select(models.Account).where(models.Account.email == body.email))
-    dev = False
+    dev, code = False, None
     if acct is not None and db.get(models.Credential, acct.id) is not None:
         delivery = _issue_otp(db, acct)
-        dev = delivery.get("dev", False)
-    return {"status": "otp_sent", "email": body.email, "dev_mode": dev}
+        dev, code = delivery.get("dev", False), delivery.get("code")
+    return {"status": "otp_sent", "email": body.email, "dev_mode": dev, "otp": code}
 
 
 class ResetPasswordIn(BaseModel):

@@ -76,6 +76,18 @@ def _send_smtp(to: str, subject: str, body: str) -> dict:
 def send_email(to: str, subject: str, body: str, html: str | None = None) -> dict:
     """Send one email via the best configured transport. Raises HTTPException(502) if a configured
     provider fails (so OTP delivery failures surface); prints to console when nothing is configured."""
+    # In development we never call an external provider — this dodges provider limits (e.g. Resend's
+    # sandbox only mails your own verified address), so signup/OTP is fully self-serve with no mail
+    # configured. The OTP itself is surfaced to the client by the auth layer. Production always sends
+    # for real (production_problems() forces DEV_MODE off before a live deploy can boot).
+    if settings.dev_mode:
+        print(
+            f"\n──────── EMAIL (dev mode — NOT actually sent) ────────\n"
+            f"To:      {to}\nSubject: {subject}\n\n{body}\n"
+            f"──────────────────────────────────────────────────────\n",
+            flush=True,
+        )
+        return {"sent": False, "dev": True}
     if settings.resend_api_key:
         return _send_resend(to, subject, body, html)
     if settings.smtp_host:
