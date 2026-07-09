@@ -19,10 +19,15 @@ services:
         value: development
       - key: DEV_MODE
         value: "true"
+      # Free tier is single-CPU with ~512MB RAM: run ONE worker. (Multiple workers also race to seed
+      # the DB at boot unless DATABASE_URL is Postgres, which serialises them via an advisory lock —
+      # one worker sidesteps that entirely. Bump this only on a paid multi-core instance.)
       - key: WEB_CONCURRENCY
-        value: "2"
+        value: "1"
       # Secrets — set these in the Render dashboard (they are NOT stored in git):
-      - key: DATABASE_URL      # the existing Neon URL: postgresql+psycopg2://...?sslmode=require
+      # DATABASE_URL is REQUIRED — it MUST be your Neon Postgres URL (postgresql://...neon.tech...).
+      # If it is blank/unset the app silently falls back to SQLite and the deploy fails.
+      - key: DATABASE_URL
         sync: false
       - key: JWT_SECRET        # any long random string
         sync: false
