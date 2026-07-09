@@ -48,8 +48,11 @@ def resolve_chapter(db: Session, exam: str, topic: str | None, topic_id: str | N
 def chapter_analysis(db: Session, learner: models.Account, topic: models.KnowledgeNode,
                      now: datetime | None = None) -> dict:
     now = now or engine.now_utc()
-    concepts = kg._concepts_of_topic(db, topic.id)
-    concept_ids = [c.id for c in concepts]
+    concepts = kg._concepts_of_topic(db, topic.id)          # incl. the hidden practice bank
+    concept_ids = [c.id for c in concepts]                  # aggregates count practice too
+    # subtopic-level DISPLAY (list, strongest/weakest, topics-learnt) excludes the practice bank —
+    # it isn't a real subtopic — but its responses still feed the chapter's totals/accuracy/mastery.
+    display_concepts = [c for c in concepts if not kg.is_practice_bank(c)]
     name_by_id = {c.id: c.name for c in concepts}
 
     # ---- pull every response in this chapter, oldest first ----
@@ -73,14 +76,14 @@ def chapter_analysis(db: Session, learner: models.Account, topic: models.Knowled
     cstates = {c.id: kg.concept_state(db, learner.id, c, now) for c in concepts}
     topic_mastery = kg.topic_mastery(db, learner.id, topic, now)
     # "Topics learnt" = subtopics whose MAB mastery has crossed the learnt bar (70%).
-    learnt = sum(1 for c in concepts if cstates[c.id].mastery >= LEARNT_THRESHOLD)
+    learnt = sum(1 for c in display_concepts if cstates[c.id].mastery >= LEARNT_THRESHOLD)
 
     # ---- KPIs ----
     kpis = {
         "questions_answered": total,
         "topic_mastery": round(topic_mastery, 4),
         "concepts_learnt": learnt,
-        "concepts_total": len(concepts),
+        "concepts_total": len(display_concepts),
         "overall_accuracy": round(total_correct / total, 4) if total else 0.0,
     }
 
@@ -118,12 +121,12 @@ def chapter_analysis(db: Session, learner: models.Account, topic: models.Knowled
         "learned_hms": _hms(learned_s), "practiced_hms": _hms(practiced_s),
     }
 
-    # ---- strongest / weakest concepts by mastery ----
-    ranked = sorted(concepts, key=lambda c: cstates[c.id].mastery, reverse=True)
+    # ---- strongest / weakest concepts by mastery (real subtopics only) ----
+    ranked = sorted(display_concepts, key=lambda c: cstates[c.id].mastery, reverse=True)
     def _entry(c):
         return {"id": c.id, "name": c.name, "mastery": round(cstates[c.id].mastery, 4)}
     strongest = [_entry(c) for c in ranked[:5]]
-    weakest = [_entry(c) for c in sorted(concepts, key=lambda c: cstates[c.id].mastery)[:5]]
+    weakest = [_entry(c) for c in sorted(display_concepts, key=lambda c: cstates[c.id].mastery)[:5]]
 
     # ---- per-concept accuracy (for subtopics + recommendations) ----
     c_total = defaultdict(int)
@@ -141,7 +144,7 @@ def chapter_analysis(db: Session, learner: models.Account, topic: models.Knowled
         "learnt": cstates[c.id].mastery >= LEARNT_THRESHOLD,
         "attempts": cstates[c.id].attempts, "accuracy": _acc(c.id),
         "edge": round(cstates[c.id].edge, 2),
-    } for c in concepts]
+    } for c in display_concepts]
 
     # ---- recommended next actions (driven by the same MAB the loop uses) ----
     actions = _recommended_actions(db, learner, topic, cstates, _acc, now)

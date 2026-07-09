@@ -102,9 +102,10 @@ def learn_overview(exam: str, learner=Depends(get_current_learner), db: Session 
     for s in sections:
         chapter_defs: list[tuple[str, str, list]] = []
         for t in [n for n in nodes if n.kind == models.NodeKind.topic.value and n.section_id == s.id]:
-            concepts = [c for c in children.get(t.id, []) if c.kind == models.NodeKind.concept.value]
+            concepts = [c for c in children.get(t.id, [])
+                        if c.kind == models.NodeKind.concept.value and not kg.is_practice_bank(c)]
             chapter_defs.append((t.id, t.name, concepts))
-        orphans = [n for n in nodes if n.kind == models.NodeKind.concept.value
+        orphans = [n for n in nodes if n.kind == models.NodeKind.concept.value and not kg.is_practice_bank(n)
                    and n.section_id == s.id and (n.parent_id is None or n.parent_id not in topic_ids)]
         if orphans:
             chapter_defs.append(("_general_" + s.key, s.name, orphans))

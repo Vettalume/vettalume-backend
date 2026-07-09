@@ -19,6 +19,22 @@ from . import engine
 from .engine import Attempt
 
 
+# A chapter's "practice bank" is a hidden concept node (id ends with this suffix) holding chapter-
+# level practice questions. It IS served in the practice section and counts toward the chapter's
+# mastery/accuracy, but it is NOT a real subtopic — so it's hidden from the student's subtopic lists
+# and skipped by the guided learn-next flow (practice-only).
+PRACTICE_BANK_SUFFIX = "__practice"
+
+
+def practice_bank_node_id(topic_id: str) -> str:
+    return f"{topic_id}{PRACTICE_BANK_SUFFIX}"
+
+
+def is_practice_bank(node) -> bool:
+    nid = node if isinstance(node, str) else getattr(node, "id", "")
+    return bool(nid) and nid.endswith(PRACTICE_BANK_SUFFIX)
+
+
 @dataclass
 class ConceptState:
     node_id: str
@@ -183,7 +199,8 @@ def topic_fully_mastered(db: Session, learner_id: uuid.UUID, topic: models.Knowl
     there is nothing left to teach *or climb* here. Distinct from ``topic_mastery >= H``, which can be
     true after a single lucky correct while harder items remain unseen."""
     now = now or engine.now_utc()
-    concepts = [c for c in _concepts_of_topic(db, topic.id) if _concept_has_items(db, c.id)]
+    concepts = [c for c in _concepts_of_topic(db, topic.id)
+                if _concept_has_items(db, c.id) and not is_practice_bank(c)]
     if not concepts:
         return True
     return all(concept_state(db, learner_id, c, now).mastered for c in concepts)
@@ -265,7 +282,8 @@ def within_topic_candidates(db: Session, learner_id: uuid.UUID, topic: models.Kn
     (concept_node, mode)."""
     now = now or engine.now_utc()
     concepts = [c for c in _concepts_of_topic(db, topic.id)
-                if _concept_has_items(db, c.id) and c.id not in exclude_concept_ids]
+                if _concept_has_items(db, c.id) and c.id not in exclude_concept_ids
+                and not is_practice_bank(c)]
     states = {c.id: concept_state(db, learner_id, c, now) for c in concepts}
 
     learn = [c for c in concepts

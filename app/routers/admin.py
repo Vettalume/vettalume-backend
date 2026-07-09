@@ -26,7 +26,7 @@ from .. import models
 from ..config import settings
 from ..deps import get_db
 from ..schemas import IngestReport, ItemIn
-from ..services import html_sanitize, ingestion, question_bank
+from ..services import html_sanitize, ingestion, knowledge_graph as kg, question_bank
 from ..services.admin_auth import grant_admin, require_admin, revoke_admin
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -258,6 +258,26 @@ def rename_node(node_id: str, body: NodeRenameIn, db: Session = Depends(get_db))
     n.name = name
     db.commit()
     return {"id": n.id, "name": n.name, "kind": n.kind}
+
+
+@router.post("/chapters/{topic_id}/practice-bank")
+def ensure_practice_bank(topic_id: str, db: Session = Depends(get_db)) -> dict:
+    """Get-or-create the hidden per-chapter practice bank — a concept node that holds chapter-level
+    practice questions. These are served in the student practice section (via the MAB) and count
+    toward the chapter's mastery/accuracy, but never show up as a subtopic. Author questions into it
+    with the normal item endpoints using the returned ``id`` as the concept."""
+    topic = db.get(models.KnowledgeNode, topic_id)
+    if topic is None or topic.kind != models.NodeKind.topic.value:
+        raise HTTPException(404, f"no chapter {topic_id!r}")
+    pid = kg.practice_bank_node_id(topic_id)
+    node = db.get(models.KnowledgeNode, pid)
+    if node is None:
+        node = models.KnowledgeNode(
+            id=pid, exam_code=topic.exam_code, section_id=topic.section_id,
+            kind=models.NodeKind.concept.value, name="Chapter practice bank", parent_id=topic_id)
+        db.add(node)
+        db.commit()
+    return {"id": pid, "topic_id": topic_id, "name": node.name}
 
 
 # ───────────────────────── items ─────────────────────────
