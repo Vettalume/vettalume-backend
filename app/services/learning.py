@@ -8,7 +8,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import models
@@ -60,11 +60,15 @@ def practice_batch(db: Session, learner: models.Account, topic: models.Knowledge
                    limit: int = 1000, now: datetime | None = None) -> dict:
     """A batch of practice questions for one chapter, delivered as a set (like a sectional mock) so
     the learner can work a palette of questions instead of one-at-a-time. Ordering mirrors the
-    problem bandit: FRESH (never-answered) items first, each near its concept's MAPLE edge; once the
-    fresh pool is dry, already-seen items follow as spaced review. Difficulty/answer/solution are NOT
-    included — feedback comes from POST /learn/answer after each submission."""
+    problem bandit: FRESH (never-answered) items first, each near its MAPLE edge; once the fresh pool
+    is dry, already-seen items follow as spaced review. Difficulty/answer/solution are NOT included —
+    feedback comes from POST /learn/answer after each submission.
+
+    Pool = ONLY the chapter's practice bank (the questions an admin uploaded in the practice section),
+    never the per-subtopic learning quizzes."""
     now = now or engine.now_utc()
-    concepts = kg._concepts_of_topic(db, topic.id)
+    pb = db.get(models.KnowledgeNode, kg.practice_bank_node_id(topic.id))
+    concepts = [pb] if pb is not None else []
     expo = _exposure_detail(db, learner.id)
 
     scored: list[tuple[int, float, str, models.Item]] = []
@@ -85,6 +89,46 @@ def practice_batch(db: Session, learner: models.Account, topic: models.Knowledge
             "format": it.format, "num_options": it.num_options,
             "difficulty": it.difficulty_d, "concept_id": it.concept_node_id,
         } for it in batch],
+    }
+
+
+def practice_next(db: Session, learner: models.Account, topic: models.KnowledgeNode,
+                  exclude_item_ids=frozenset(), now: datetime | None = None) -> dict:
+    """The MAB serves ONE practice question for this chapter — the problem bandit picks a fresh item
+    whose difficulty sits nearest the learner's edge (edge moves +/- as they answer, so difficulty
+    adapts); once the fresh pool is exhausted it resurfaces the least-recently-seen one as spaced
+    review. There is no jumping — the learner answers, then asks for the next. Pool = the chapter's
+    practice bank only. ``exclude_item_ids`` skips anything already shown this session."""
+    now = now or engine.now_utc()
+    pb_id = kg.practice_bank_node_id(topic.id)
+    pb = db.get(models.KnowledgeNode, pb_id)
+    if pb is None:
+        return {"status": "empty", "answered": 0, "total": 0,
+                "message": "No practice questions have been added for this chapter yet."}
+
+    total = kg._concept_item_count(db, pb_id)
+    answered = db.scalar(
+        select(func.count(func.distinct(models.Response.item_id)))
+        .join(models.Item, models.Item.item_id == models.Response.item_id)
+        .where(models.Response.learner_id == learner.id, models.Item.concept_node_id == pb_id,
+               models.Response.context == models.Context.practice.value)) or 0
+
+    edge = kg.concept_state(db, learner.id, pb, now).edge
+    item = select_problem(db, learner.id, pb_id, edge, exclude_item_ids, allow_seen=False)
+    review = False
+    if item is None:  # fresh pool exhausted -> spaced review of an earlier item
+        item = select_problem(db, learner.id, pb_id, edge, exclude_item_ids, allow_seen=True)
+        review = True
+    if item is None:
+        return {"status": "done", "answered": answered, "total": total,
+                "message": "You've worked through the practice questions in this chapter."}
+
+    return {
+        "status": "ok", "review": review, "answered": answered, "total": total,
+        "chapter": {"id": topic.id, "name": topic.name, "section": kg._section_key_of(db, topic)},
+        "question": {"item_id": item.item_id, "stem": item.stem, "options": item.options or [],
+                     "format": item.format, "num_options": item.num_options,
+                     "difficulty": item.difficulty_d},
     }
 
 

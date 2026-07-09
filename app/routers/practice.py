@@ -30,6 +30,22 @@ def practice_session(exam: str, topic: Optional[str] = None, topic_id: Optional[
     return learning.practice_batch(db, learner, node, limit=limit)
 
 
+@router.get("/adaptive")
+def practice_adaptive(exam: str, topic: Optional[str] = None, topic_id: Optional[str] = None,
+                      exclude: Optional[str] = None, learner=Depends(get_current_learner),
+                      db: Session = Depends(get_db)) -> dict:
+    """The MAB's next single practice question for a chapter (one at a time, no jumping). Pool is the
+    chapter's practice bank only. `exclude` is a comma-separated list of item ids shown this session."""
+    exam = (exam or "").upper()
+    if db.get(models.Exam, exam) is None:
+        raise HTTPException(404, f"unknown exam '{exam}'")
+    node = analytics.resolve_chapter(db, exam, topic, topic_id)
+    if node is None:
+        raise HTTPException(404, f"no chapter '{topic or topic_id}' in exam '{exam}'")
+    skip = frozenset(p.strip() for p in exclude.split(",") if p.strip()) if exclude else frozenset()
+    return learning.practice_next(db, learner, node, exclude_item_ids=skip)
+
+
 @router.get("/next", response_model=ItemPublic)
 def next_item(node_id: str, learner=Depends(get_current_learner), db: Session = Depends(get_db)) -> ItemPublic:
     """Return the next question for a concept. Phase 0 picks the first eligible item; Phase 1's
