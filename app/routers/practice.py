@@ -17,7 +17,7 @@ router = APIRouter(prefix="/practice", tags=["practice"])
 
 @router.get("/session")
 def practice_session(exam: str, topic: Optional[str] = None, topic_id: Optional[str] = None,
-                     limit: int = 15, learner=Depends(get_current_learner),
+                     limit: int = 1000, learner=Depends(get_current_learner),
                      db: Session = Depends(get_db)) -> dict:
     """A set of practice questions for one chapter, delivered like a sectional mock (a palette of
     questions to work through). Identify the chapter by `topic` (name) or `topic_id`."""

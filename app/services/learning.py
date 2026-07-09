@@ -57,7 +57,7 @@ def select_problem(db: Session, learner_id: uuid.UUID, concept_id: str, edge: fl
 
 
 def practice_batch(db: Session, learner: models.Account, topic: models.KnowledgeNode,
-                   limit: int = 15, now: datetime | None = None) -> dict:
+                   limit: int = 1000, now: datetime | None = None) -> dict:
     """A batch of practice questions for one chapter, delivered as a set (like a sectional mock) so
     the learner can work a palette of questions instead of one-at-a-time. Ordering mirrors the
     problem bandit: FRESH (never-answered) items first, each near its concept's MAPLE edge; once the
@@ -75,7 +75,7 @@ def practice_batch(db: Session, learner: models.Account, topic: models.Knowledge
             scored.append((0 if seen == 0 else 1,
                            -engine.problem_weight(it.difficulty_d, edge), it.item_id, it))
     scored.sort(key=lambda t: (t[0], t[1], t[2]))
-    batch = [it for _, _, _, it in scored[:max(1, limit)]]
+    batch = [it for _, _, _, it in scored[:max(1, min(limit, 2000))]]
 
     return {
         "exam": topic.exam_code,
