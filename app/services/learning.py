@@ -5,6 +5,7 @@ Topic bandit (ZPD + room-to-grow) -> within-topic action (learn next / revise we
 """
 from __future__ import annotations
 
+import random
 import uuid
 from datetime import datetime, timezone
 
@@ -143,8 +144,13 @@ def practice_next(db: Session, learner: models.Account, topic: models.KnowledgeN
                 "chapter": {"id": topic.id, "name": topic.name},
                 "message": "You've mastered the practice for every subtopic in this chapter."}
 
-    # CONCEPT bandit: most room-to-grow first (started subtopics carry momentum); id breaks ties.
+    # CONCEPT bandit: rank by room-to-grow (started subtopics carry momentum), but questions are
+    # MIXED across subtopics — with an exploration chance we surface a different subtopic next, so the
+    # student bounces between subtopics rather than draining one before the next. Each subtopic still
+    # keeps its OWN difficulty ladder, so whichever surfaces appears at its own level (easy if fresh).
     active.sort(key=lambda p: (-engine.expected_gain(st[p.id].mastery, st[p.id].attempts > 0), p.id))
+    if len(active) > 1 and random.random() < 0.45:
+        active.insert(0, active.pop(random.randrange(len(active))))
 
     for pool in active:
         # PROBLEM bandit: pick a fresh item nearest this pool's easy-start edge; the edge already
