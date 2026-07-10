@@ -67,18 +67,6 @@ def learn_overview(exam: str, learner=Depends(get_current_learner), db: Session 
         st = states.get(cid)
         return round(100 * (st.mastery if st else 0.0))
 
-    # Breadth signal for "Syllabus covered": a subtopic counts as touched once the student has
-    # engaged with it in any way — read the theory, watched the video, answered a question, or
-    # built any mastery. (Distinct from depth/mastery, which the ability + chapter bars show.)
-    def concept_touched(cid: str) -> bool:
-        st = states.get(cid)
-        eng = (st.engagement or {}) if st else {}
-        if eng.get("read") or eng.get("watched"):
-            return True
-        if any(i in answered_items for i in items_by_concept.get(cid, [])):
-            return True
-        return bool(st and st.mastery > 0)
-
     def chapter_difficulty(concept_ids: list[str]) -> list[dict]:
         # difficulty -2..2 -> D1..D5; bar fill = accuracy (correct / answered) in that band
         bands = {b: {"answered": 0, "correct": 0, "total": 0} for b in range(1, 6)}
@@ -118,14 +106,10 @@ def learn_overview(exam: str, learner=Depends(get_current_learner), db: Session 
             chapter_defs.append(("_general_" + s.key, s.name, orphans))
 
         chapters = []
-        section_pcts: list[int] = []     # depth: per-subtopic mastery %
-        section_total = 0                # breadth denominator: total subtopics
-        section_touched = 0              # breadth numerator: subtopics engaged with
+        section_pcts: list[int] = []     # per-subtopic mastery %
         for cid, cname, concepts in chapter_defs:
             subs = [{"id": c.id, "name": c.name, "pct": concept_pct(c.id)} for c in concepts]
             section_pcts.extend(x["pct"] for x in subs)
-            section_total += len(concepts)
-            section_touched += sum(1 for c in concepts if concept_touched(c.id))
             chapters.append({
                 "id": cid, "name": cname,
                 "pct": avg_pct([x["pct"] for x in subs]),   # chapter progress = avg subtopic mastery
@@ -135,9 +119,8 @@ def learn_overview(exam: str, learner=Depends(get_current_learner), db: Session 
 
         out_sections.append({
             "key": s.key, "name": s.name,
-            # breadth: how much of the syllabus has been touched (0..100)
-            "syllabus": round(100 * section_touched / section_total) if section_total else 0,
-            # depth: ability + mastery are the average subtopic mastery (out of 100)
+            # Syllabus covered = the average of the chapter progress bars shown on the section page.
+            "syllabus": avg_pct([c["pct"] for c in chapters]),
             "ability": avg_pct(section_pcts),
             "mastery": avg_pct(section_pcts),
             "chapters": chapters,
