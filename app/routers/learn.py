@@ -60,17 +60,24 @@ def learn_overview(exam: str, learner=Depends(get_current_learner), db: Session 
         if ok:
             correct_items.add(iid)
 
-    # subtopic progress weighting (chosen): read concept 25% + watch video 25% + quiz accuracy 50%
-    W_READ, W_WATCH, W_QUIZ = 0.25, 0.25, 0.50
-
+    # Subtopic / chapter progress = the engine's blended mastery (0.40*P + 0.30*D + 0.30*M),
+    # persisted per node on every answer. This is the same "mastery" the chapter-analysis page
+    # shows, so the section page, dashboard, and analysis all agree.
     def concept_pct(cid: str) -> int:
         st = states.get(cid)
+        return round(100 * (st.mastery if st else 0.0))
+
+    # Breadth signal for "Syllabus covered": a subtopic counts as touched once the student has
+    # engaged with it in any way — read the theory, watched the video, answered a question, or
+    # built any mastery. (Distinct from depth/mastery, which the ability + chapter bars show.)
+    def concept_touched(cid: str) -> bool:
+        st = states.get(cid)
         eng = (st.engagement or {}) if st else {}
-        read = 1.0 if eng.get("read") else 0.0
-        watched = 1.0 if eng.get("watched") else 0.0
-        its = items_by_concept.get(cid, [])
-        quiz = (sum(1 for i in its if i in correct_items) / len(its)) if its else 0.0
-        return round(100 * (W_READ * read + W_WATCH * watched + W_QUIZ * quiz))
+        if eng.get("read") or eng.get("watched"):
+            return True
+        if any(i in answered_items for i in items_by_concept.get(cid, [])):
+            return True
+        return bool(st and st.mastery > 0)
 
     def chapter_difficulty(concept_ids: list[str]) -> list[dict]:
         # difficulty -2..2 -> D1..D5; bar fill = accuracy (correct / answered) in that band
@@ -111,21 +118,26 @@ def learn_overview(exam: str, learner=Depends(get_current_learner), db: Session 
             chapter_defs.append(("_general_" + s.key, s.name, orphans))
 
         chapters = []
-        section_pcts: list[int] = []
+        section_pcts: list[int] = []     # depth: per-subtopic mastery %
+        section_total = 0                # breadth denominator: total subtopics
+        section_touched = 0              # breadth numerator: subtopics engaged with
         for cid, cname, concepts in chapter_defs:
             subs = [{"id": c.id, "name": c.name, "pct": concept_pct(c.id)} for c in concepts]
             section_pcts.extend(x["pct"] for x in subs)
+            section_total += len(concepts)
+            section_touched += sum(1 for c in concepts if concept_touched(c.id))
             chapters.append({
                 "id": cid, "name": cname,
-                "pct": avg_pct([x["pct"] for x in subs]),
+                "pct": avg_pct([x["pct"] for x in subs]),   # chapter progress = avg subtopic mastery
                 "difficulty": chapter_difficulty([c.id for c in concepts]),
                 "subtopics": subs,
             })
 
-        started = sum(1 for p in section_pcts if p > 0)
         out_sections.append({
             "key": s.key, "name": s.name,
-            "syllabus": round(100 * started / len(section_pcts)) if section_pcts else 0,
+            # breadth: how much of the syllabus has been touched (0..100)
+            "syllabus": round(100 * section_touched / section_total) if section_total else 0,
+            # depth: ability + mastery are the average subtopic mastery (out of 100)
             "ability": avg_pct(section_pcts),
             "mastery": avg_pct(section_pcts),
             "chapters": chapters,

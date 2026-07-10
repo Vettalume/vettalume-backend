@@ -26,12 +26,6 @@ _BANDS = [(-2, "D1"), (-1, "D2"), (0, "D3"), (1, "D4"), (2, "D5")]
 LEARNT_THRESHOLD = 0.70
 
 
-def _hms(seconds: float) -> str:
-    s = int(seconds)
-    h, rem = divmod(s, 3600)
-    m, _ = divmod(rem, 60)
-    return f"{h}h {m:02d}m" if h else f"{m}m"
-
 
 def resolve_chapter(db: Session, exam: str, topic: str | None, topic_id: str | None):
     """Find the topic node by id (preferred) or case-insensitive name within the exam."""
@@ -103,24 +97,6 @@ def chapter_analysis(db: Session, learner: models.Account, topic: models.Knowled
     # ---- improvement over time: weekly cumulative accuracy proxy ----
     improvement = _improvement_over_time(responses, topic_mastery, now)
 
-    # ---- learning vs practice time (first attempt per concept = learning, rest = practice) ----
-    seen_concept: set[str] = set()
-    learned_s = practiced_s = 0.0
-    for r, cid in responses:
-        secs = (r.response_time_ms or 0) / 1000.0
-        if cid not in seen_concept:
-            seen_concept.add(cid)
-            learned_s += secs
-        else:
-            practiced_s += secs
-    tot_s = learned_s + practiced_s
-    learning_vs_practice = {
-        "learned_seconds": round(learned_s), "practiced_seconds": round(practiced_s),
-        "learned_pct": round(learned_s / tot_s, 4) if tot_s else 0.0,
-        "practiced_pct": round(practiced_s / tot_s, 4) if tot_s else 0.0,
-        "learned_hms": _hms(learned_s), "practiced_hms": _hms(practiced_s),
-    }
-
     # ---- strongest / weakest concepts by mastery (real subtopics only) ----
     ranked = sorted(display_concepts, key=lambda c: cstates[c.id].mastery, reverse=True)
     def _entry(c):
@@ -159,7 +135,6 @@ def chapter_analysis(db: Session, learner: models.Account, topic: models.Knowled
         "kpis": kpis,
         "difficulty_spread": difficulty_spread,
         "improvement_over_time": improvement,
-        "learning_vs_practice": learning_vs_practice,
         "strongest": strongest,
         "weakest": weakest,
         "recommended_actions": actions,
