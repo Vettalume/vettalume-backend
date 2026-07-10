@@ -94,42 +94,86 @@ def practice_batch(db: Session, learner: models.Account, topic: models.Knowledge
 
 def practice_next(db: Session, learner: models.Account, topic: models.KnowledgeNode,
                   exclude_item_ids=frozenset(), now: datetime | None = None) -> dict:
-    """The MAB serves ONE practice question for this chapter — the problem bandit picks a fresh item
-    whose difficulty sits nearest the learner's edge (edge moves +/- as they answer, so difficulty
-    adapts); once the fresh pool is exhausted it resurfaces the least-recently-seen one as spaced
-    review. There is no jumping — the learner answers, then asks for the next. Pool = the chapter's
-    practice bank only. ``exclude_item_ids`` skips anything already shown this session."""
+    """Serve ONE practice question for this chapter via the hierarchical ZPDES bandit.
+
+    Each subtopic has its OWN practice pool (a hidden ``<subtopic>__practice`` concept the admin
+    uploads into). Two bandits run:
+      * CONCEPT bandit — pick which subtopic to drill, favouring the one with the most room to grow
+        toward mastery (started subtopics get a momentum boost). Mastered subtopics leave the pool.
+      * PROBLEM bandit — inside that subtopic, MAPLE steers difficulty: a fresh subtopic STARTS EASY
+        and each correct answer promotes it a step harder (each subtopic keeps its own ladder, so a
+        newly-entered one starts easy again). Fresh questions first; then spaced review.
+
+    A subtopic's questions stop appearing once its mastery crosses the threshold — so every question
+    that appears is one the learner is ready to learn from. Progress is counted in mastered subtopics.
+    """
     now = now or engine.now_utc()
-    pb_id = kg.practice_bank_node_id(topic.id)
-    pb = db.get(models.KnowledgeNode, pb_id)
-    if pb is None:
-        return {"status": "empty", "answered": 0, "total": 0,
-                "message": "No practice questions have been added for this chapter yet."}
+    # the chapter's per-subtopic practice pools that actually hold questions
+    pools = [c for c in kg._concepts_of_topic(db, topic.id)
+             if kg.is_practice_bank(c) and kg._concept_has_items(db, c.id)]
+    total = len(pools)
+    if not pools:
+        return {"status": "empty", "subtopics_total": 0, "subtopics_mastered": 0,
+                "chapter": {"id": topic.id, "name": topic.name},
+                "message": "No practice questions have been added for this chapter's subtopics yet."}
 
-    total = kg._concept_item_count(db, pb_id)
-    answered = db.scalar(
-        select(func.count(func.distinct(models.Response.item_id)))
-        .join(models.Item, models.Item.item_id == models.Response.item_id)
-        .where(models.Response.learner_id == learner.id, models.Item.concept_node_id == pb_id,
-               models.Response.context == models.Context.practice.value)) or 0
+    # hardest difficulty available in each pool — mastery must climb to (near) it, so easy-only
+    # streaks can't finish a subtopic; the learner has to conquer its hard questions.
+    max_d = dict(db.execute(
+        select(models.Item.concept_node_id, func.max(models.Item.difficulty_d))
+        .where(models.Item.concept_node_id.in_([p.id for p in pools]))
+        .group_by(models.Item.concept_node_id)).all())
 
-    edge = kg.concept_state(db, learner.id, pb, now).edge
-    item = select_problem(db, learner.id, pb_id, edge, exclude_item_ids, allow_seen=False)
-    review = False
-    if item is None:  # fresh pool exhausted -> spaced review of an earlier item
-        item = select_problem(db, learner.id, pb_id, edge, exclude_item_ids, allow_seen=True)
-        review = True
-    if item is None:
-        return {"status": "done", "answered": answered, "total": total,
-                "message": "You've worked through the practice questions in this chapter."}
+    # per pool: blended mastery, MAPLE edge (easy-start ladder), and whether it's "done"
+    st = {p.id: kg.concept_state(db, learner.id, p, now) for p in pools}
+    edge = {p.id: engine.maple_edge(kg.concept_attempts(db, learner.id, p.id), start=engine.MAPLE_MIN)
+            for p in pools}
 
-    return {
-        "status": "ok", "review": review, "answered": answered, "total": total,
-        "chapter": {"id": topic.id, "name": topic.name, "section": kg._section_key_of(db, topic)},
-        "question": {"item_id": item.item_id, "stem": item.stem, "options": item.options or [],
-                     "format": item.format, "num_options": item.num_options,
-                     "difficulty": item.difficulty_d},
-    }
+    def done(p):
+        # mastered = blended score past H AND the ladder has climbed to within a rung of the pool's
+        # hardest question AND enough evidence — i.e. they've worked easy -> hard and can do the hard.
+        return (st[p.id].mastery >= engine.H
+                and edge[p.id] >= (max_d.get(p.id, 0) - engine.MAPLE_STEP)
+                and st[p.id].attempts >= engine.MASTERY_MIN_ATTEMPTS)
+
+    mastered = sum(1 for p in pools if done(p))
+    active = [p for p in pools if not done(p)]
+    if not active:
+        return {"status": "done", "subtopics_total": total, "subtopics_mastered": mastered,
+                "chapter": {"id": topic.id, "name": topic.name},
+                "message": "You've mastered the practice for every subtopic in this chapter."}
+
+    # CONCEPT bandit: most room-to-grow first (started subtopics carry momentum); id breaks ties.
+    active.sort(key=lambda p: (-engine.expected_gain(st[p.id].mastery, st[p.id].attempts > 0), p.id))
+
+    for pool in active:
+        # PROBLEM bandit: pick a fresh item nearest this pool's easy-start edge; the edge already
+        # reflects how far up the ladder this subtopic has climbed.
+        e = edge[pool.id]
+        item = select_problem(db, learner.id, pool.id, e, exclude_item_ids, allow_seen=False)
+        review = False
+        if item is None:  # fresh questions for this subtopic exhausted -> spaced review
+            item = select_problem(db, learner.id, pool.id, e, exclude_item_ids, allow_seen=True)
+            review = True
+        if item is None:
+            continue
+        sub_id = pool.id[:-len(kg.PRACTICE_BANK_SUFFIX)]
+        sub = db.get(models.KnowledgeNode, sub_id)
+        sub_name = sub.name if sub else pool.name.replace(" · practice", "")
+        cstate = st[pool.id]
+        return {
+            "status": "ok", "review": review,
+            "subtopics_total": total, "subtopics_mastered": mastered,
+            "chapter": {"id": topic.id, "name": topic.name, "section": kg._section_key_of(db, topic)},
+            "subtopic": {"id": sub_id, "name": sub_name, "mastery": round(cstate.mastery, 4),
+                         "mastery_threshold": round(engine.H, 4)},
+            "question": {"item_id": item.item_id, "stem": item.stem, "options": item.options or [],
+                         "format": item.format, "num_options": item.num_options,
+                         "difficulty": item.difficulty_d},
+        }
+    return {"status": "done", "subtopics_total": total, "subtopics_mastered": mastered,
+            "chapter": {"id": topic.id, "name": topic.name},
+            "message": "You've worked through the available practice questions in this chapter."}
 
 
 def next_step(db: Session, learner: models.Account, exam: str,

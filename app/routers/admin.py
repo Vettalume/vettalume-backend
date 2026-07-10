@@ -260,24 +260,29 @@ def rename_node(node_id: str, body: NodeRenameIn, db: Session = Depends(get_db))
     return {"id": n.id, "name": n.name, "kind": n.kind}
 
 
-@router.post("/chapters/{topic_id}/practice-bank")
-def ensure_practice_bank(topic_id: str, db: Session = Depends(get_db)) -> dict:
-    """Get-or-create the hidden per-chapter practice bank — a concept node that holds chapter-level
-    practice questions. These are served in the student practice section (via the MAB) and count
-    toward the chapter's mastery/accuracy, but never show up as a subtopic. Author questions into it
-    with the normal item endpoints using the returned ``id`` as the concept."""
-    topic = db.get(models.KnowledgeNode, topic_id)
-    if topic is None or topic.kind != models.NodeKind.topic.value:
-        raise HTTPException(404, f"no chapter {topic_id!r}")
-    pid = kg.practice_bank_node_id(topic_id)
-    node = db.get(models.KnowledgeNode, pid)
+@router.post("/nodes/{node_id}/practice-bank")
+def ensure_practice_bank(node_id: str, db: Session = Depends(get_db)) -> dict:
+    """Get-or-create a hidden practice pool for a SUBTOPIC (or a whole chapter). The questions live in
+    ``<node_id>__practice`` — a concept parented to the chapter, so it counts toward the chapter's
+    mastery/accuracy but never shows up as a subtopic. The student practice section runs the MAB over
+    these per-subtopic pools. Author questions into it via the item endpoints using the returned id."""
+    node = db.get(models.KnowledgeNode, node_id)
     if node is None:
-        node = models.KnowledgeNode(
-            id=pid, exam_code=topic.exam_code, section_id=topic.section_id,
-            kind=models.NodeKind.concept.value, name="Chapter practice bank", parent_id=topic_id)
-        db.add(node)
+        raise HTTPException(404, f"no node {node_id!r}")
+    pid = kg.practice_bank_node_id(node_id)
+    pool = db.get(models.KnowledgeNode, pid)
+    if pool is None:
+        # keep the pool a child of the chapter: a subtopic's pool sits under its chapter (node.parent),
+        # a chapter's pool under the chapter itself.
+        is_sub = node.kind == models.NodeKind.concept.value
+        parent_id = node.parent_id if is_sub else node.id
+        name = f"{node.name} · practice" if is_sub else "Chapter practice bank"
+        pool = models.KnowledgeNode(
+            id=pid, exam_code=node.exam_code, section_id=node.section_id,
+            kind=models.NodeKind.concept.value, name=name, parent_id=parent_id)
+        db.add(pool)
         db.commit()
-    return {"id": pid, "topic_id": topic_id, "name": node.name}
+    return {"id": pid, "node_id": node_id, "name": pool.name}
 
 
 # ───────────────────────── items ─────────────────────────
