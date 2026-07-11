@@ -114,13 +114,23 @@ def learn_overview(exam: str, learner=Depends(get_current_learner), db: Session 
             chapter_defs.append(("_general_" + s.key, s.name, orphans))
 
         chapters = []
-        section_pcts: list[int] = []     # per-subtopic mastery %
+        started_masteries: list[int] = []   # chapter topic-mastery, STARTED chapters only (Ability)
+        all_masteries: list[int] = []        # chapter topic-mastery, every chapter (Concept Mastery)
         for cid, cname, concepts in chapter_defs:
             subs = [{"id": c.id, "name": c.name, "pct": concept_pct(c.id)} for c in concepts]
-            section_pcts.extend(x["pct"] for x in subs)
+            ch_progress = avg_pct([x["pct"] for x in subs])   # notes + video + correct/total
+            # chapter topic-mastery = avg of its subtopics' blended mastery (0.40P+0.30D+0.30M),
+            # persisted per node, out of 100
+            ch_mastery = avg_pct([
+                round(100 * (states[c.id].mastery if c.id in states else 0.0)) for c in concepts
+            ])
+            all_masteries.append(ch_mastery)
+            if ch_progress > 0:               # the learner has started this chapter
+                started_masteries.append(ch_mastery)
             chapters.append({
                 "id": cid, "name": cname,
-                "pct": avg_pct([x["pct"] for x in subs]),   # chapter progress = avg subtopic mastery
+                "pct": ch_progress,
+                "mastery": ch_mastery,
                 "difficulty": chapter_difficulty([c.id for c in concepts]),
                 "subtopics": subs,
             })
@@ -129,8 +139,10 @@ def learn_overview(exam: str, learner=Depends(get_current_learner), db: Session 
             "key": s.key, "name": s.name,
             # Syllabus covered = the average of the chapter progress bars shown on the section page.
             "syllabus": avg_pct([c["pct"] for c in chapters]),
-            "ability": avg_pct(section_pcts),
-            "mastery": avg_pct(section_pcts),
+            # Ability = topic-mastery averaged over the chapters the learner has started (0 until one begins).
+            "ability": avg_pct(started_masteries),
+            # Concept Mastery = topic-mastery averaged over ALL chapters (untouched chapters count as 0).
+            "mastery": avg_pct(all_masteries),
             "chapters": chapters,
         })
 
