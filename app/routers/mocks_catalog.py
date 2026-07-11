@@ -31,6 +31,34 @@ def list_mocks(exam: str, type: Optional[str] = None,
     return student_mocks.list_published(db, exam, type)
 
 
+# NOTE: these specific routes are declared BEFORE "/{mid}" so they aren't captured by it.
+@router.get("/attempts/{attempt_id}")
+def attempt_analysis(attempt_id: str,
+                     learner=Depends(get_current_learner), db: Session = Depends(get_db)) -> dict:
+    """Full analysis of ONE completed mock attempt (per-question review + section/overall scores)."""
+    return student_mocks.individual_analysis(db, learner, attempt_id)
+
+
+@router.get("/section-analysis")
+def section_analysis(exam: str, section: str,
+                     learner=Depends(get_current_learner), db: Session = Depends(get_db)) -> dict:
+    """Aggregate analytics across every sectional-mock attempt the learner has made in one section."""
+    exam = (exam or "").upper()
+    if db.get(models.Exam, exam) is None:
+        raise HTTPException(404, f"unknown exam '{exam}'")
+    return student_mocks.section_analysis(db, learner, exam, section)
+
+
+@router.get("/full-analysis")
+def full_analysis(exam: str,
+                  learner=Depends(get_current_learner), db: Session = Depends(get_db)) -> dict:
+    """Aggregate analytics across every FULL-mock attempt the learner has made in one exam."""
+    exam = (exam or "").upper()
+    if db.get(models.Exam, exam) is None:
+        raise HTTPException(404, f"unknown exam '{exam}'")
+    return student_mocks.full_analysis(db, learner, exam)
+
+
 @router.get("/{mid}")
 def get_mock(mid: str, learner=Depends(get_current_learner), db: Session = Depends(get_db)) -> dict:
     """The paper to take — sections + questions with the answer key stripped."""
@@ -38,11 +66,13 @@ def get_mock(mid: str, learner=Depends(get_current_learner), db: Session = Depen
 
 
 class MockSubmitIn(BaseModel):
-    answers: dict = Field(default_factory=dict)  # { question_id : selected_option_index }
+    answers: dict = Field(default_factory=dict)      # { question_id : selected_option_index | value }
+    durations: dict = Field(default_factory=dict)    # { question_id : ms spent } (optional)
+    timeMs: int = 0                                  # total time taken (optional)
 
 
 @router.post("/{mid}/submit")
 def submit_mock(mid: str, body: MockSubmitIn,
                 learner=Depends(get_current_learner), db: Session = Depends(get_db)) -> dict:
-    """Grade a submission and return the raw score (per section + overall)."""
-    return student_mocks.submit(db, learner, mid, body.answers)
+    """Grade a submission, persist it as an attempt, and return the score + attempt id."""
+    return student_mocks.submit(db, learner, mid, body.answers, body.durations, body.timeMs)

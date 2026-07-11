@@ -591,3 +591,25 @@ class DiagnosticAttempt(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     __table_args__ = (UniqueConstraint("learner_id", "exam_code", name="uq_diagnostic_once"),)
+
+
+class MockAttempt(Base):
+    """A completed admin-authored mock attempt (sectional or full). Persists the submitted answers,
+    per-question time, and the graded result, so the student can review one attempt and see
+    aggregates across every attempt in a section. Repeatable (no unique gate) — history is kept.
+    Distinct from MockSession (adaptive delivery) and DiagnosticAttempt (once-only diagnostic)."""
+    __tablename__ = "mock_attempts"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    learner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    mock_id: Mapped[str] = mapped_column(String(40), index=True)   # the Mock taken (no FK: mocks may be deleted)
+    exam_code: Mapped[str] = mapped_column(String(16), index=True)
+    mock_type: Mapped[str] = mapped_column(String(16))             # sectional | full
+    section_key: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)  # QA/VARC/DILR (sectional)
+    mock_name: Mapped[str] = mapped_column(String(200), default="")
+    answers: Mapped[dict] = mapped_column(JSONType, default=dict)      # {question_id: selected}
+    durations: Mapped[dict] = mapped_column(JSONType, default=dict)    # {question_id: ms spent}
+    section_scores: Mapped[list] = mapped_column(JSONType, default=list)  # [{name, raw, wrong, ...}]
+    overall: Mapped[dict] = mapped_column(JSONType, default=dict)      # {raw, wrong, unattempted, total, ...}
+    time_ms: Mapped[int] = mapped_column(Integer, default=0)           # total time taken
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True)
