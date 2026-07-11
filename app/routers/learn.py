@@ -60,12 +60,20 @@ def learn_overview(exam: str, learner=Depends(get_current_learner), db: Session 
         if ok:
             correct_items.add(iid)
 
-    # Subtopic / chapter progress = the engine's blended mastery (0.40*P + 0.30*D + 0.30*M),
-    # persisted per node on every answer. This is the same "mastery" the chapter-analysis page
-    # shows, so the section page, dashboard, and analysis all agree.
+    # Subtopic / chapter progress: finishing the notes is 25% and the video 25% (50% for engaging
+    # with the material), and the other 50% is how many of the subtopic's questions the learner has
+    # answered correctly (distinct correct / total questions). Deliberately NOT the blended mastery,
+    # so completing 6 of 28 questions reads as partial progress, not near-100% from accuracy alone.
+    W_READ, W_WATCH, W_QUIZ = 0.25, 0.25, 0.50
+
     def concept_pct(cid: str) -> int:
         st = states.get(cid)
-        return round(100 * (st.mastery if st else 0.0))
+        eng = (st.engagement or {}) if st else {}
+        read = 1.0 if eng.get("read") else 0.0
+        watched = 1.0 if eng.get("watched") else 0.0
+        its = items_by_concept.get(cid, [])
+        quiz = (sum(1 for i in its if i in correct_items) / len(its)) if its else 0.0
+        return round(100 * (W_READ * read + W_WATCH * watched + W_QUIZ * quiz))
 
     def chapter_difficulty(concept_ids: list[str]) -> list[dict]:
         # difficulty -2..2 -> D1..D5; bar fill = accuracy (correct / answered) in that band

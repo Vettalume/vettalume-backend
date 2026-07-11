@@ -370,6 +370,11 @@ def delete_item(item_id: str, db: Session = Depends(get_db)) -> dict:
     it = db.get(models.Item, item_id)
     if it is None:
         raise HTTPException(404, f"no item {item_id!r}")
+    # Remove rows that reference this item first, or the FK blocks the delete and the row
+    # survives in the DB while the admin UI has already dropped it (FK-safe order).
+    db.execute(delete(models.IrtParameter).where(models.IrtParameter.item_id == item_id))
+    db.execute(delete(models.Response).where(models.Response.item_id == item_id))
+    db.execute(delete(models.Exposure).where(models.Exposure.item_id == item_id))
     db.delete(it)
     db.commit()
     return {"ok": True, "deleted": item_id}

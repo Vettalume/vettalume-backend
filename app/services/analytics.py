@@ -10,7 +10,7 @@ import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import models
@@ -113,8 +113,36 @@ def chapter_analysis(db: Session, learner: models.Account, topic: models.Knowled
     def _acc(cid):
         return round(c_correct[cid] / c_total[cid], 4) if c_total[cid] else 0.0
 
+    # ---- per-concept progress = 25% notes + 25% video + 50% (distinct correct / total questions).
+    # Same blend the section page / dashboard use, so a subtopic's % means "how far through it you
+    # are", not accuracy on the few questions attempted. ----
+    item_counts = dict(db.execute(
+        select(models.Item.concept_node_id, func.count())
+        .where(models.Item.concept_node_id.in_(concept_ids or ["__none__"]))
+        .group_by(models.Item.concept_node_id)
+    ).all())
+    correct_items_by_concept: dict[str, set] = defaultdict(set)
+    for r, cid in responses:
+        if r.correct:
+            correct_items_by_concept[cid].add(r.item_id)
+    eng_by_concept = {
+        s.node_id: (s.engagement or {})
+        for s in db.scalars(select(models.LearnerNodeState).where(
+            models.LearnerNodeState.learner_id == learner.id,
+            models.LearnerNodeState.node_id.in_(concept_ids or ["__none__"]))).all()
+    }
+
+    def _progress(cid: str) -> float:
+        eng = eng_by_concept.get(cid, {})
+        read = 1.0 if eng.get("read") else 0.0
+        watched = 1.0 if eng.get("watched") else 0.0
+        tot = item_counts.get(cid, 0)
+        quiz = (len(correct_items_by_concept.get(cid, set())) / tot) if tot else 0.0
+        return round(0.25 * read + 0.25 * watched + 0.50 * quiz, 4)
+
     subtopics = [{
         "id": c.id, "name": c.name,
+        "progress": _progress(c.id),
         "mastery": round(cstates[c.id].mastery, 4),
         "learned": cstates[c.id].learned, "mastered": cstates[c.id].mastered,
         "learnt": cstates[c.id].mastery >= LEARNT_THRESHOLD,
