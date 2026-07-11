@@ -97,12 +97,8 @@ def chapter_analysis(db: Session, learner: models.Account, topic: models.Knowled
     # ---- improvement over time: weekly cumulative accuracy proxy ----
     improvement = _improvement_over_time(responses, topic_mastery, now)
 
-    # ---- strongest / weakest concepts by mastery (real subtopics only) ----
-    ranked = sorted(display_concepts, key=lambda c: cstates[c.id].mastery, reverse=True)
-    def _entry(c):
-        return {"id": c.id, "name": c.name, "mastery": round(cstates[c.id].mastery, 4)}
-    strongest = [_entry(c) for c in ranked[:5]]
-    weakest = [_entry(c) for c in sorted(display_concepts, key=lambda c: cstates[c.id].mastery)[:5]]
+    # strongest / weakest topics are computed further down, once _progress is defined — they rank by
+    # (and display) the same progress value the subtopic list shows, so the numbers agree.
 
     # ---- per-concept accuracy (for subtopics + recommendations) ----
     c_total = defaultdict(int)
@@ -139,6 +135,14 @@ def chapter_analysis(db: Session, learner: models.Account, topic: models.Knowled
         tot = item_counts.get(cid, 0)
         quiz = (len(correct_items_by_concept.get(cid, set())) / tot) if tot else 0.0
         return round(0.25 * read + 0.25 * watched + 0.50 * quiz, 4)
+
+    # ---- strongest / weakest subtopics ranked by PROGRESS (matches the subtopic list values) ----
+    def _entry(c):
+        return {"id": c.id, "name": c.name,
+                "progress": _progress(c.id), "mastery": round(cstates[c.id].mastery, 4)}
+    strongest = sorted((_entry(c) for c in display_concepts),
+                       key=lambda e: e["progress"], reverse=True)[:5]
+    weakest = sorted((_entry(c) for c in display_concepts), key=lambda e: e["progress"])[:5]
 
     subtopics = [{
         "id": c.id, "name": c.name,
