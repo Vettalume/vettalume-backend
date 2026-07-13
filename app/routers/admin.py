@@ -1151,6 +1151,10 @@ def toggle_mock_publish(mid: str, db: Session = Depends(get_db)) -> dict:
 @router.delete("/mocks/{mid}")
 def delete_mock(mid: str, db: Session = Depends(get_db)) -> dict:
     m = _mock_or_404(db, mid)
+    # Remove every student's attempt data for this mock, so attempt counts / best-last cards don't
+    # outlive the mock (a deleted mock leaves no orphaned attempts for any student).
+    a = db.execute(delete(models.MockAttempt).where(models.MockAttempt.mock_id == mid)).rowcount
+    db.execute(delete(models.DiagnosticAttempt).where(models.DiagnosticAttempt.mock_id == mid))
     db.delete(m)
     db.commit()
-    return {"ok": True, "deleted": mid}
+    return {"ok": True, "deleted": mid, "attempts_removed": a}
