@@ -237,19 +237,21 @@ def individual_analysis(db, learner, attempt_id) -> dict:
     } for b in ("D1", "D2", "D3", "D4", "D5")]
 
     # ---- subtopic-wise strong / weak + recommendations (from the questions' subtopic tags) ----
+    # `score` = correct / TOTAL questions in the subtopic (coverage-aware): leaving questions
+    # unattempted counts against you, so a 1-of-4 subtopic is weak even if that one was right.
     topics = [{
         "name": n, "section": v["section"], "attempted": v["attempted"],
         "correct": v["correct"], "total": v["total"],
         "accuracy": round(v["correct"] / v["attempted"], 4) if v["attempted"] else 0.0,
+        "score": round(v["correct"] / v["total"], 4) if v["total"] else 0.0,
     } for n, v in topic_stats.items()]
-    tried = [t for t in topics if t["attempted"] > 0]
-    strong = sorted([t for t in tried if t["accuracy"] >= 0.7],
-                    key=lambda t: t["accuracy"], reverse=True)[:5]
-    weak = sorted([t for t in tried if t["accuracy"] < 0.7], key=lambda t: t["accuracy"])[:5]
+    strong = sorted([t for t in topics if t["score"] >= 0.7],
+                    key=lambda t: t["score"], reverse=True)[:5]
+    weak = sorted([t for t in topics if t["score"] < 0.7], key=lambda t: t["score"])[:5]
     recommendations = [{
-        "name": t["name"], "section": t["section"], "accuracy": t["accuracy"],
-        "tip": f"{round(t['accuracy'] * 100)}% correct on {t['name']} — revise it and drill more "
-               f"questions before your next mock.",
+        "name": t["name"], "section": t["section"], "accuracy": t["score"],
+        "tip": f"{round(t['score'] * 100)}% of {t['name']} solved — attempt and master the rest "
+               f"before your next mock.",
     } for t in weak]
 
     return {
