@@ -61,7 +61,7 @@ def paper(db, mid: str) -> dict:
     for s in (m.sections or []):
         qs = [{"id": q.get("id"), "text": q.get("text", ""), "options": q.get("options", []) or [],
                "image": q.get("image", ""), "difficulty": q.get("difficulty", 0),
-               "format": q.get("format", "mcq")}
+               "format": q.get("format", "mcq"), "passage": q.get("passage", "") or ""}
               for q in (s.get("questions", []) or [])]
         secs.append({"id": s.get("id"), "name": s.get("name"), "time": s.get("time", 0), "questions": qs})
     return {"id": m.id, "name": m.name, "type": m.type, "exam": m.exam_code,
