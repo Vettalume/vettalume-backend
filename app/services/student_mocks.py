@@ -54,6 +54,17 @@ def _published_or_404(db, mid: str) -> models.Mock:
     return m
 
 
+def _question_passage(q) -> str:
+    """The passage/caselet shown on the left in VARC/DILR. Newer imports store it in `passage`; some
+    older imports dumped the passage text into `passageId` — a slug has no spaces, so a spaced value
+    there is really the passage text (backwards-compatible fallback)."""
+    p = (q.get("passage") or "").strip()
+    if p:
+        return p
+    pid = str(q.get("passageId") or "")
+    return pid if " " in pid else ""
+
+
 def paper(db, mid: str) -> dict:
     """The mock to take — sections + questions WITHOUT the correct answers or solutions."""
     m = _published_or_404(db, mid)
@@ -61,7 +72,7 @@ def paper(db, mid: str) -> dict:
     for s in (m.sections or []):
         qs = [{"id": q.get("id"), "text": q.get("text", ""), "options": q.get("options", []) or [],
                "image": q.get("image", ""), "difficulty": q.get("difficulty", 0),
-               "format": q.get("format", "mcq"), "passage": q.get("passage", "") or ""}
+               "format": q.get("format", "mcq"), "passage": _question_passage(q)}
               for q in (s.get("questions", []) or [])]
         secs.append({"id": s.get("id"), "name": s.get("name"), "time": s.get("time", 0), "questions": qs})
     return {"id": m.id, "name": m.name, "type": m.type, "exam": m.exam_code,
