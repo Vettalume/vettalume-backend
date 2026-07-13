@@ -313,6 +313,9 @@ def mock_summary(db, learner, exam: str) -> dict:
         "lastSectional": card(sect[-1] if sect else None),
         "bestFull": card(best(full)),
         "lastFull": card(full[-1] if full else None),
+        # distinct mocks attempted (for the "attempted / available" practice tiles)
+        "sectionalAttempted": len({a.mock_id for a in sect}),
+        "fullAttempted": len({a.mock_id for a in full}),
     }
 
 
