@@ -59,6 +59,16 @@ def full_analysis(exam: str,
     return student_mocks.full_analysis(db, learner, exam)
 
 
+@router.get("/summary")
+def mock_summary(exam: str,
+                 learner=Depends(get_current_learner), db: Session = Depends(get_db)) -> dict:
+    """Best + most-recent sectional/full attempt for the dashboard mock cards."""
+    exam = (exam or "").upper()
+    if db.get(models.Exam, exam) is None:
+        raise HTTPException(404, f"unknown exam '{exam}'")
+    return student_mocks.mock_summary(db, learner, exam)
+
+
 @router.get("/{mid}")
 def get_mock(mid: str, learner=Depends(get_current_learner), db: Session = Depends(get_db)) -> dict:
     """The paper to take — sections + questions with the answer key stripped."""

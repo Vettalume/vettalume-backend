@@ -275,6 +275,47 @@ def section_analysis(db, learner, exam: str, section: str) -> dict:
     }
 
 
+def mock_summary(db, learner, exam: str) -> dict:
+    """The dashboard 'Best Mock' / 'Last Mock' cards: the learner's best (highest %) and most recent
+    attempt for both sectional and full mocks in one exam. Each card is null when there's no attempt."""
+    exam = (exam or "").upper()
+    attempts = db.scalars(
+        select(models.MockAttempt).where(
+            models.MockAttempt.learner_id == learner.id,
+            models.MockAttempt.exam_code == exam,
+        ).order_by(models.MockAttempt.created_at)  # oldest -> newest
+    ).all()
+
+    def card(a):
+        if a is None:
+            return None
+        ov = a.overall or {}
+        mt = ov.get("marks_total", 0) or 0
+        score = ov.get("score", 0)
+        return {
+            "mockId": a.mock_id, "name": a.mock_name, "type": a.mock_type,
+            "section": a.section_key, "score": score, "marksTotal": mt,
+            "pct": round(100 * score / mt, 1) if mt else 0.0,
+            "date": a.created_at.isoformat() if a.created_at else None,
+        }
+
+    def best(lst):
+        cand = [a for a in lst if (a.overall or {}).get("marks_total")]
+        if not cand:
+            return None
+        return max(cand, key=lambda a: a.overall.get("score", 0) / (a.overall.get("marks_total") or 1))
+
+    sect = [a for a in attempts if a.mock_type == "sectional"]
+    full = [a for a in attempts if a.mock_type == "full"]
+    return {
+        "exam": exam,
+        "bestSectional": card(best(sect)),
+        "lastSectional": card(sect[-1] if sect else None),
+        "bestFull": card(best(full)),
+        "lastFull": card(full[-1] if full else None),
+    }
+
+
 def full_analysis(db, learner, exam: str) -> dict:
     """Aggregate across every FULL-mock attempt the learner has made in one exam: attempts count,
     avg/best/lowest score, average accuracy + time, score/accuracy/time trends, and per-section
