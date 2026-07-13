@@ -192,6 +192,7 @@ def individual_analysis(db, learner, attempt_id) -> dict:
     sections, questions = [], []
     band_tot: dict[str, int] = {}
     band_cor: dict[str, int] = {}
+    topic_stats: dict[str, dict] = {}   # per-subtopic (from the Excel) accuracy -> strong/weak
     for s in ((m.sections if m else None) or []):
         qlist = []
         for q in (s.get("questions", []) or []):
@@ -203,6 +204,15 @@ def individual_analysis(db, learner, attempt_id) -> dict:
             b = _band(q.get("difficulty", 0))
             band_tot[b] = band_tot.get(b, 0) + 1
             band_cor[b] = band_cor.get(b, 0) + (1 if correct else 0)
+            tname = str(q.get("subtopic") or q.get("topic") or "").strip()
+            if tname:
+                ts = topic_stats.setdefault(
+                    tname, {"section": s.get("name"), "attempted": 0, "correct": 0, "total": 0})
+                ts["total"] += 1
+                if attempted:
+                    ts["attempted"] += 1
+                if correct:
+                    ts["correct"] += 1
             opts = q.get("options", []) or []
             your_txt = (opts[int(sel)] if (opts and str(sel).isdigit() and 0 <= int(sel) < len(opts))
                         else (str(sel) if attempted else ""))
@@ -226,12 +236,29 @@ def individual_analysis(db, learner, attempt_id) -> dict:
         "cleared_pct": round(band_cor.get(b, 0) / band_tot[b], 4) if band_tot.get(b) else 0.0,
     } for b in ("D1", "D2", "D3", "D4", "D5")]
 
+    # ---- subtopic-wise strong / weak + recommendations (from the questions' subtopic tags) ----
+    topics = [{
+        "name": n, "section": v["section"], "attempted": v["attempted"],
+        "correct": v["correct"], "total": v["total"],
+        "accuracy": round(v["correct"] / v["attempted"], 4) if v["attempted"] else 0.0,
+    } for n, v in topic_stats.items()]
+    tried = [t for t in topics if t["attempted"] > 0]
+    strong = sorted([t for t in tried if t["accuracy"] >= 0.7],
+                    key=lambda t: t["accuracy"], reverse=True)[:5]
+    weak = sorted([t for t in tried if t["accuracy"] < 0.7], key=lambda t: t["accuracy"])[:5]
+    recommendations = [{
+        "name": t["name"], "section": t["section"], "accuracy": t["accuracy"],
+        "tip": f"{round(t['accuracy'] * 100)}% correct on {t['name']} — revise it and drill more "
+               f"questions before your next mock.",
+    } for t in weak]
+
     return {
         "attemptId": str(a.id), "mockId": a.mock_id, "mockName": a.mock_name,
         "exam": a.exam_code, "type": a.mock_type, "section": a.section_key,
         "completedAt": a.created_at.isoformat() if a.created_at else None,
         "timeMs": a.time_ms, "overall": a.overall, "sections": sections,
         "difficulty_spread": difficulty_spread, "questions": questions,
+        "topics": topics, "strong": strong, "weak": weak, "recommendations": recommendations,
     }
 
 
