@@ -35,7 +35,7 @@ else:
 engine = create_engine(
     settings.database_url,
     connect_args=connect_args,
-    pool_pre_ping=True,
+    pool_pre_ping=settings.db_pool_pre_ping,
     future=True,
     **engine_kwargs,
 )

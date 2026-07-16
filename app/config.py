@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     db_max_overflow: int = 10       # extra burst connections per worker beyond pool_size
     db_pool_timeout: int = 30       # seconds a request waits for a free connection before erroring
     db_pool_recycle: int = 1800     # recycle a connection after N seconds (avoids stale/closed sockets)
+    # Pre-ping does a "SELECT 1" on every connection checkout to catch dead sockets (e.g. after Neon
+    # free-tier auto-suspend) — safe but adds one round trip per request. Turn OFF only once the app and
+    # DB are co-located (round trip ~5ms) or the DB no longer auto-suspends.
+    db_pool_pre_ping: bool = True
+
+    # /learn/overview caches the static per-exam shape (sections/chapters/concepts + item lists) this
+    # long, so each request only fetches the caller's own state. Admin content edits appear after at
+    # most this many seconds. Set 0 to disable the cache.
+    overview_cache_ttl_seconds: int = 60
 
     # CORS allowed origins, comma-separated (env CORS_ORIGINS). "*" is convenient for dev but is rejected
     # in production by production_problems() because "*" + allow_credentials is both invalid (browsers

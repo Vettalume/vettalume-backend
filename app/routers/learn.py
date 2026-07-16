@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -17,6 +19,92 @@ from ..services import learning
 router = APIRouter(prefix="/learn", tags=["learn"])
 
 
+# --- /learn/overview static cache ------------------------------------------------------------------
+# The exam "shape" (sections -> chapters -> concepts, plus each concept's item ids/difficulties) is
+# identical for every learner and only changes when an admin edits content. Fetching it (all nodes +
+# all items for the exam) is 2-3 of the heaviest cross-region round trips in the request, so we build
+# it once and cache it for `overview_cache_ttl_seconds`. Each request then does only the two
+# per-learner queries (states + responses). Plain data only — never cache ORM instances (they are
+# bound to a DB Session that gets closed).
+_STATIC_LOCK = threading.Lock()
+_STATIC_CACHE: dict[str, tuple[float, dict | None]] = {}  # exam -> (expires_at_monotonic, payload|None)
+
+
+def invalidate_overview_cache(exam: str | None = None) -> None:
+    """Drop cached exam shape(s) so the next /learn/overview rebuilds. Call after admin content edits."""
+    with _STATIC_LOCK:
+        if exam is None:
+            _STATIC_CACHE.clear()
+        else:
+            _STATIC_CACHE.pop(exam.upper(), None)
+
+
+def _build_overview_static(db: Session, exam: str) -> dict | None:
+    """Everything in /learn/overview that does NOT depend on the caller. Returns None for an unknown
+    exam. Output is pure plain data so it can be cached across DB sessions safely."""
+    if db.get(models.Exam, exam) is None:
+        return None
+
+    sections = db.scalars(select(models.Section).where(models.Section.exam_code == exam)).all()
+    nodes = db.scalars(select(models.KnowledgeNode).where(models.KnowledgeNode.exam_code == exam)).all()
+    item_rows = db.execute(
+        select(models.Item.item_id, models.Item.concept_node_id, models.Item.difficulty_d)
+        .where(models.Item.exam_code == exam)
+    ).all()
+
+    items_by_concept: dict[str, list[str]] = {}
+    diff_by_item: dict[str, int] = {}
+    for iid, cnid, d in item_rows:
+        items_by_concept.setdefault(cnid, []).append(iid)
+        diff_by_item[iid] = d if d is not None else 0
+
+    children: dict[str, list] = {}
+    for n in nodes:
+        if n.parent_id:
+            children.setdefault(n.parent_id, []).append(n)
+    topic_ids = {n.id for n in nodes if n.kind == models.NodeKind.topic.value}
+
+    sections_static: list[dict] = []
+    for s in sections:
+        chapter_defs: list[tuple[str, str, list]] = []
+        for t in [n for n in nodes if n.kind == models.NodeKind.topic.value and n.section_id == s.id]:
+            concepts = [c for c in children.get(t.id, [])
+                        if c.kind == models.NodeKind.concept.value and not kg.is_practice_bank(c)]
+            chapter_defs.append((t.id, t.name, concepts))
+        orphans = [n for n in nodes if n.kind == models.NodeKind.concept.value and not kg.is_practice_bank(n)
+                   and n.section_id == s.id and (n.parent_id is None or n.parent_id not in topic_ids)]
+        if orphans:
+            chapter_defs.append(("_general_" + s.key, s.name, orphans))
+        chapters = [
+            {"id": cid, "name": cname, "concepts": [{"id": c.id, "name": c.name} for c in concepts]}
+            for cid, cname, concepts in chapter_defs
+        ]
+        sections_static.append({"key": s.key, "name": s.name, "chapters": chapters})
+
+    return {
+        "sections": sections_static,
+        "items_by_concept": items_by_concept,
+        "diff_by_item": diff_by_item,
+    }
+
+
+def _overview_static(db: Session, exam: str) -> dict | None:
+    ttl = settings.overview_cache_ttl_seconds
+    if ttl <= 0:
+        return _build_overview_static(db, exam)
+    now = time.monotonic()
+    hit = _STATIC_CACHE.get(exam)
+    if hit and hit[0] > now:
+        return hit[1]
+    with _STATIC_LOCK:
+        hit = _STATIC_CACHE.get(exam)
+        if hit and hit[0] > now:
+            return hit[1]
+        payload = _build_overview_static(db, exam)
+        _STATIC_CACHE[exam] = (now + ttl, payload)
+        return payload
+
+
 @router.get("/overview")
 def learn_overview(exam: str, learner=Depends(get_current_learner), db: Session = Depends(get_db)) -> dict:
     """Everything the student learning UI needs for one exam, in one call:
@@ -26,29 +114,19 @@ def learn_overview(exam: str, learner=Depends(get_current_learner), db: Session 
     what the UI should show until they start learning. As admins add topics/concepts (and students
     make progress), this fills in automatically."""
     exam = (exam or "").upper()
-    if db.get(models.Exam, exam) is None:
+    static = _overview_static(db, exam)
+    if static is None:
         raise HTTPException(404, f"unknown exam '{exam}'")
+    items_by_concept: dict[str, list[str]] = static["items_by_concept"]
+    diff_by_item: dict[str, int] = static["diff_by_item"]
 
-    sections = db.scalars(select(models.Section).where(models.Section.exam_code == exam)).all()
-    nodes = db.scalars(select(models.KnowledgeNode).where(models.KnowledgeNode.exam_code == exam)).all()
+    # Only the caller's own progress is fetched per request; the exam shape came from the cache above.
     states = {
         s.node_id: s
         for s in db.scalars(
             select(models.LearnerNodeState).where(models.LearnerNodeState.learner_id == learner.id)
         ).all()
     }
-
-    # items (for quiz signals) + this learner's responses, batched
-    item_rows = db.execute(
-        select(models.Item.item_id, models.Item.concept_node_id, models.Item.difficulty_d)
-        .where(models.Item.exam_code == exam)
-    ).all()
-    items_by_concept: dict[str, list[str]] = {}
-    diff_by_item: dict[str, int] = {}
-    for iid, cnid, d in item_rows:
-        items_by_concept.setdefault(cnid, []).append(iid)
-        diff_by_item[iid] = d if d is not None else 0
-
     resp_rows = db.execute(
         select(models.Response.item_id, models.Response.correct)
         .where(models.Response.learner_id == learner.id, models.Response.exam_code == exam)
@@ -95,48 +173,34 @@ def learn_overview(exam: str, learner=Depends(get_current_learner), db: Session 
     def avg_pct(values: list[int]) -> int:
         return round(sum(values) / len(values)) if values else 0
 
-    children: dict[str, list] = {}
-    for n in nodes:
-        if n.parent_id:
-            children.setdefault(n.parent_id, []).append(n)
-    topic_ids = {n.id for n in nodes if n.kind == models.NodeKind.topic.value}
+    def mastery_pct(cid: str) -> int:
+        return round(100 * (states[cid].mastery if cid in states else 0.0))
 
     out_sections = []
-    for s in sections:
-        chapter_defs: list[tuple[str, str, list]] = []
-        for t in [n for n in nodes if n.kind == models.NodeKind.topic.value and n.section_id == s.id]:
-            concepts = [c for c in children.get(t.id, [])
-                        if c.kind == models.NodeKind.concept.value and not kg.is_practice_bank(c)]
-            chapter_defs.append((t.id, t.name, concepts))
-        orphans = [n for n in nodes if n.kind == models.NodeKind.concept.value and not kg.is_practice_bank(n)
-                   and n.section_id == s.id and (n.parent_id is None or n.parent_id not in topic_ids)]
-        if orphans:
-            chapter_defs.append(("_general_" + s.key, s.name, orphans))
-
+    for s in static["sections"]:
         chapters = []
         started_masteries: list[int] = []   # chapter topic-mastery, STARTED chapters only (Ability)
         all_masteries: list[int] = []        # chapter topic-mastery, every chapter (Concept Mastery)
-        for cid, cname, concepts in chapter_defs:
-            subs = [{"id": c.id, "name": c.name, "pct": concept_pct(c.id)} for c in concepts]
+        for ch in s["chapters"]:
+            concept_ids = [c["id"] for c in ch["concepts"]]
+            subs = [{"id": c["id"], "name": c["name"], "pct": concept_pct(c["id"])} for c in ch["concepts"]]
             ch_progress = avg_pct([x["pct"] for x in subs])   # notes + video + correct/total
             # chapter topic-mastery = avg of its subtopics' blended mastery (0.40P+0.30D+0.30M),
             # persisted per node, out of 100
-            ch_mastery = avg_pct([
-                round(100 * (states[c.id].mastery if c.id in states else 0.0)) for c in concepts
-            ])
+            ch_mastery = avg_pct([mastery_pct(cid) for cid in concept_ids])
             all_masteries.append(ch_mastery)
             if ch_progress > 0:               # the learner has started this chapter
                 started_masteries.append(ch_mastery)
             chapters.append({
-                "id": cid, "name": cname,
+                "id": ch["id"], "name": ch["name"],
                 "pct": ch_progress,
                 "mastery": ch_mastery,
-                "difficulty": chapter_difficulty([c.id for c in concepts]),
+                "difficulty": chapter_difficulty(concept_ids),
                 "subtopics": subs,
             })
 
         out_sections.append({
-            "key": s.key, "name": s.name,
+            "key": s["key"], "name": s["name"],
             # Syllabus covered = the average of the chapter progress bars shown on the section page.
             "syllabus": avg_pct([c["pct"] for c in chapters]),
             # Ability = topic-mastery averaged over the chapters the learner has started (0 until one begins).
