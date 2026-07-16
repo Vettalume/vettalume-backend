@@ -34,6 +34,7 @@ def _attempt(db, learner, exam: str):
 
 
 def status(db, learner, exam: str) -> dict:
+    exam = (exam or "").upper()
     mock = active_diagnostic(db, exam)
     att = _attempt(db, learner, exam)
     if att is not None and att.status == "completed":
@@ -64,6 +65,7 @@ def _paper(mock) -> dict:
 
 
 def start(db, learner, exam: str) -> dict:
+    exam = (exam or "").upper()
     mock = active_diagnostic(db, exam)
     if mock is None:
         raise HTTPException(404, {"error": "no_diagnostic",
@@ -99,6 +101,7 @@ def _score_section(questions, answers) -> dict:
 
 
 def submit(db, learner, exam: str, answers: dict) -> dict:
+    exam = (exam or "").upper()
     mock = active_diagnostic(db, exam)
     att = _attempt(db, learner, exam)
     if att is not None and att.status == "completed":
@@ -135,6 +138,7 @@ def submit(db, learner, exam: str, answers: dict) -> dict:
 
 
 def result(db, learner, exam: str) -> dict:
+    exam = (exam or "").upper()
     att = _attempt(db, learner, exam)
     if att is None or att.status != "completed":
         raise HTTPException(404, {"error": "not_completed",
