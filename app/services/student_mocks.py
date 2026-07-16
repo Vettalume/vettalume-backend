@@ -69,12 +69,13 @@ def _question_passage(q) -> str:
 def paper(db, mid: str) -> dict:
     """The mock to take — sections + questions WITHOUT the correct answers or solutions."""
     m = _published_or_404(db, mid)
-    all_ids = [q.get("id") for s in (m.sections or []) for q in (s.get("questions", []) or [])]
+    all_ids = [c for s in (m.sections or []) for q in (s.get("questions", []) or [])
+               for c in (q.get("id"), q.get("externalId"))]
     img_keys = media.existing_keys(db, all_ids)
     secs = []
     for s in (m.sections or []):
         qs = [{"id": q.get("id"), "text": q.get("text", ""), "options": q.get("options", []) or [],
-               "image": media.resolve(q.get("image", ""), q.get("id"), img_keys),
+               "image": media.resolve(q.get("image", ""), [q.get("id"), q.get("externalId")], img_keys),
                "difficulty": q.get("difficulty", 0),
                "format": q.get("format", "mcq"), "passage": _question_passage(q)}
               for q in (s.get("questions", []) or [])]

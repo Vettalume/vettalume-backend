@@ -54,12 +54,13 @@ def status(db, learner, exam: str) -> dict:
 
 def _paper(db, mock) -> dict:
     """The paper to present — sections + questions WITHOUT correct answers or solutions."""
-    all_ids = [q.get("id") for s in (mock.sections or []) for q in s.get("questions", [])]
+    all_ids = [c for s in (mock.sections or []) for q in s.get("questions", [])
+               for c in (q.get("id"), q.get("externalId"))]
     img_keys = media.existing_keys(db, all_ids)
     secs = []
     for s in (mock.sections or []):
         qs = [{"id": q.get("id"), "text": q.get("text", ""), "options": q.get("options", []),
-               "image": media.resolve(q.get("image", ""), q.get("id"), img_keys),
+               "image": media.resolve(q.get("image", ""), [q.get("id"), q.get("externalId")], img_keys),
                "difficulty": q.get("difficulty", 0)}
               for q in s.get("questions", [])]
         secs.append({"id": s.get("id"), "name": s.get("name"), "time": s.get("time", 0), "questions": qs})

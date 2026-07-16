@@ -23,8 +23,15 @@ def existing_keys(db: Session, ids) -> set[str]:
     return set(db.scalars(select(models.MediaAsset.key).where(models.MediaAsset.key.in_(wanted))).all())
 
 
-def resolve(explicit_image: str, qid, keys: set[str]) -> str:
-    """An explicit image URL wins; otherwise auto-attach /media/{qid} when one was uploaded."""
+def resolve(explicit_image: str, candidates, keys: set[str]) -> str:
+    """An explicit image URL wins; otherwise auto-attach /media/{key} for the first candidate id that
+    has an uploaded image. `candidates` may be a single id or a list — a question is matched by its
+    generated id OR its author id (the Excel "Question ID", stored as externalId / external_id), so
+    images named by either work."""
     if explicit_image:
         return explicit_image
-    return f"/media/{qid}" if str(qid) in keys else ""
+    ids = candidates if isinstance(candidates, (list, tuple, set)) else [candidates]
+    for cid in ids:
+        if cid and str(cid) in keys:
+            return f"/media/{cid}"
+    return ""

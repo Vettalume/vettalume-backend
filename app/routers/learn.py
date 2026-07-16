@@ -317,7 +317,11 @@ def concept_quiz(node_id: str, learner=Depends(get_current_learner), db: Session
             )
         ).all()
     )
-    img_keys = media.existing_keys(db, [it.item_id for it in items])
+    def _cands(it):
+        ext = (it.provenance or {}).get("external_id") if it.provenance else None
+        return [it.item_id, ext]
+
+    img_keys = media.existing_keys(db, [c for it in items for c in _cands(it)])
     questions = [
         {
             "id": it.item_id,
@@ -325,7 +329,7 @@ def concept_quiz(node_id: str, learner=Depends(get_current_learner), db: Session
             "difficulty": it.difficulty_d,
             "stem": it.stem,
             "options": it.options or [],
-            "image": media.resolve("", it.item_id, img_keys),
+            "image": media.resolve("", _cands(it), img_keys),
             "correct_answer": it.correct_answer,
             "solution": it.solution or "",
             "answered": it.item_id in answered,
