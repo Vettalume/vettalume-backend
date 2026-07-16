@@ -567,6 +567,21 @@ class MediaAsset(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class ContactMessage(Base):
+    """A "Contact us" form submission from the public site. Read + triaged by admins."""
+
+    __tablename__ = "contact_messages"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    first_name: Mapped[str] = mapped_column(String(120), default="")
+    last_name: Mapped[str] = mapped_column(String(120), default="")
+    phone: Mapped[str] = mapped_column(String(40), default="")
+    email: Mapped[str] = mapped_column(String(255), default="")
+    message: Mapped[str] = mapped_column(Text, default="")
+    handled: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Mock(Base):
     """An admin-authored fixed-form mock test (additive table). `type` is 'sectional' or 'full'.
     The whole section/question structure is stored as JSON in `sections` (each section carries its

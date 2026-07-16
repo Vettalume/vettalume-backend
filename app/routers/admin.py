@@ -1076,6 +1076,41 @@ def delete_media(key: str, db: Session = Depends(get_db)) -> dict:
     return {"ok": True, "deleted": key}
 
 
+# ═══════════════════════════ contact-us submissions ═══════════════════════════
+def _contact_out(m: "models.ContactMessage") -> dict:
+    return {"id": m.id, "firstName": m.first_name, "lastName": m.last_name,
+            "phone": m.phone, "email": m.email, "message": m.message,
+            "handled": bool(m.handled),
+            "createdAt": m.created_at.isoformat() if m.created_at else None}
+
+
+@router.get("/contact")
+def list_contact(db: Session = Depends(get_db)) -> dict:
+    rows = db.query(models.ContactMessage).order_by(models.ContactMessage.created_at.desc()).all()
+    return {"items": [_contact_out(m) for m in rows], "count": len(rows),
+            "unhandled": sum(1 for m in rows if not m.handled)}
+
+
+@router.patch("/contact/{cid}")
+def set_contact_handled(cid: str, handled: bool = True, db: Session = Depends(get_db)) -> dict:
+    m = db.get(models.ContactMessage, cid)
+    if m is None:
+        raise HTTPException(404, "no such message")
+    m.handled = handled
+    db.commit()
+    return _contact_out(m)
+
+
+@router.delete("/contact/{cid}")
+def delete_contact(cid: str, db: Session = Depends(get_db)) -> dict:
+    m = db.get(models.ContactMessage, cid)
+    if m is None:
+        raise HTTPException(404, "no such message")
+    db.delete(m)
+    db.commit()
+    return {"ok": True, "deleted": cid}
+
+
 # ═══════════════════════════ mock builder (fixed-form mocks) ═══════════════════════════
 class MockCreateIn(BaseModel):
     type: str                       # sectional | full
