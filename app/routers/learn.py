@@ -15,6 +15,7 @@ from ..deps import get_current_learner, get_db
 from ..schemas import LearnAnswerIn
 from ..services import knowledge_graph as kg
 from ..services import learning
+from ..services import notes
 
 router = APIRouter(prefix="/learn", tags=["learn"])
 
@@ -262,14 +263,34 @@ def concept_detail(node_id: str,
         raise HTTPException(404, f"unknown concept '{node_id}'")
     cs = kg.concept_state(db, learner.id, node)
     content = node.theory or {}
+    # Chunked/windowed delivery: return only the FIRST notes section + the total count. The rest are
+    # fetched one at a time via /concept/{id}/section/{index}, so the full body is never sent at once.
+    sections = notes.split_html(content.get("body", ""))
     return {
         "concept_id": cs.node_id, "name": cs.name, "mastery": round(cs.mastery, 4),
         "breakdown": {"P": round(cs.p, 4), "D": round(cs.d, 4), "M": round(cs.m, 4)},
         "edge": round(cs.edge, 2), "learning_progress": round(cs.learning_progress, 4),
         "attempts": cs.attempts, "learned": cs.learned, "mastered": cs.mastered,
         "due_for_review": cs.due_for_review,
-        "content": {"body": content.get("body", ""), "videos": content.get("videos", [])},
+        "content": {
+            "body": sections[0] if sections else "",
+            "totalSections": len(sections),
+            "videos": content.get("videos", []),
+        },
     }
+
+
+@router.get("/concept/{node_id}/section/{index}")
+def concept_section(node_id: str, index: int,
+                    learner=Depends(get_current_learner), db: Session = Depends(get_db)) -> dict:
+    """One notes section (1-based) of a concept — the windowed viewer fetches these on demand."""
+    node = db.get(models.KnowledgeNode, node_id)
+    if node is None or node.kind != models.NodeKind.concept.value:
+        raise HTTPException(404, f"unknown concept '{node_id}'")
+    sections = notes.split_html((node.theory or {}).get("body", ""))
+    if index < 1 or index > len(sections):
+        raise HTTPException(404, "section out of range")
+    return {"index": index, "html": sections[index - 1], "totalSections": len(sections)}
 
 
 @router.get("/concept/{node_id}/quiz")
