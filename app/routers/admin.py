@@ -1019,6 +1019,63 @@ def delete_material(mid: str, db: Session = Depends(get_db)) -> dict:
     return {"ok": True, "deleted": mid}
 
 
+# ═══════════════════════════ question images (media) ═══════════════════════════
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MB per image
+
+
+@router.post("/media")
+async def upload_media(files: list[UploadFile] = File(...), db: Session = Depends(get_db)) -> dict:
+    """Bulk-upload question images. Each file is keyed by its filename minus extension (= the
+    question/item id), e.g. `q123.png` -> key `q123`. Re-uploading a key replaces it. The image then
+    auto-attaches to the matching question wherever it appears (mocks, diagnostic, practice)."""
+    from ..services.media import key_from_filename
+
+    out = []
+    for f in files:
+        data = await f.read()
+        if not data:
+            continue
+        if len(data) > _MAX_IMAGE_BYTES:
+            raise HTTPException(413, f"{f.filename}: too large (max {_size_label(_MAX_IMAGE_BYTES)})")
+        key = key_from_filename(f.filename)
+        if not key:
+            continue
+        existing = db.get(models.MediaAsset, key)
+        if existing:
+            existing.data = data
+            existing.content_type = f.content_type or existing.content_type
+            existing.size_bytes = len(data)
+        else:
+            db.add(models.MediaAsset(key=key, content_type=(f.content_type or "image/png"),
+                                     size_bytes=len(data), data=data))
+        out.append({"key": key, "url": f"/media/{key}", "size": len(data)})
+    db.commit()
+    return {"uploaded": out, "count": len(out)}
+
+
+@router.get("/media")
+def list_media(db: Session = Depends(get_db)) -> dict:
+    rows = db.query(
+        models.MediaAsset.key, models.MediaAsset.content_type,
+        models.MediaAsset.size_bytes, models.MediaAsset.created_at,
+    ).order_by(models.MediaAsset.created_at.desc()).all()
+    return {
+        "items": [{"key": k, "url": f"/media/{k}", "contentType": ct, "size": sz,
+                   "createdAt": ca.isoformat() if ca else None} for (k, ct, sz, ca) in rows],
+        "count": len(rows),
+    }
+
+
+@router.delete("/media/{key}")
+def delete_media(key: str, db: Session = Depends(get_db)) -> dict:
+    m = db.get(models.MediaAsset, key)
+    if m is None:
+        raise HTTPException(404, "no such image")
+    db.delete(m)
+    db.commit()
+    return {"ok": True, "deleted": key}
+
+
 # ═══════════════════════════ mock builder (fixed-form mocks) ═══════════════════════════
 class MockCreateIn(BaseModel):
     type: str                       # sectional | full

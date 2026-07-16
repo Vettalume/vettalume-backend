@@ -15,6 +15,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from .. import models
+from . import media
 
 # The mock "types" a student browses. 'diagnostic' has its own once-only flow (services/diagnostic).
 STUDENT_MOCK_TYPES = ("sectional", "full")
@@ -68,10 +69,13 @@ def _question_passage(q) -> str:
 def paper(db, mid: str) -> dict:
     """The mock to take — sections + questions WITHOUT the correct answers or solutions."""
     m = _published_or_404(db, mid)
+    all_ids = [q.get("id") for s in (m.sections or []) for q in (s.get("questions", []) or [])]
+    img_keys = media.existing_keys(db, all_ids)
     secs = []
     for s in (m.sections or []):
         qs = [{"id": q.get("id"), "text": q.get("text", ""), "options": q.get("options", []) or [],
-               "image": q.get("image", ""), "difficulty": q.get("difficulty", 0),
+               "image": media.resolve(q.get("image", ""), q.get("id"), img_keys),
+               "difficulty": q.get("difficulty", 0),
                "format": q.get("format", "mcq"), "passage": _question_passage(q)}
               for q in (s.get("questions", []) or [])]
         secs.append({"id": s.get("id"), "name": s.get("name"), "time": s.get("time", 0), "questions": qs})

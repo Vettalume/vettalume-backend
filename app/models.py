@@ -553,6 +553,20 @@ class Material(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class MediaAsset(Base):
+    """A question image stored by a stable key = the question/item id (taken from the uploaded
+    filename, e.g. `q123.png` -> key `q123`). Served publicly at /media/{key} so it loads in an
+    <img>. Bytes live in the DB — fine for modestly-sized figures; swap to object storage at scale."""
+
+    __tablename__ = "media_assets"
+
+    key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    content_type: Mapped[str] = mapped_column(String(128), default="image/png")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Mock(Base):
     """An admin-authored fixed-form mock test (additive table). `type` is 'sectional' or 'full'.
     The whole section/question structure is stored as JSON in `sections` (each section carries its

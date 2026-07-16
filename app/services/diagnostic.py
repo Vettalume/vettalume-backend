@@ -15,6 +15,7 @@ from sqlalchemy import select
 
 from .. import models
 from . import irt
+from . import media
 
 
 def active_diagnostic(db, exam: str):
@@ -51,12 +52,15 @@ def status(db, learner, exam: str) -> dict:
             "completed_at": att.completed_at.isoformat() if (att and att.completed_at) else None}
 
 
-def _paper(mock) -> dict:
+def _paper(db, mock) -> dict:
     """The paper to present — sections + questions WITHOUT correct answers or solutions."""
+    all_ids = [q.get("id") for s in (mock.sections or []) for q in s.get("questions", [])]
+    img_keys = media.existing_keys(db, all_ids)
     secs = []
     for s in (mock.sections or []):
         qs = [{"id": q.get("id"), "text": q.get("text", ""), "options": q.get("options", []),
-               "image": q.get("image", ""), "difficulty": q.get("difficulty", 0)}
+               "image": media.resolve(q.get("image", ""), q.get("id"), img_keys),
+               "difficulty": q.get("difficulty", 0)}
               for q in s.get("questions", [])]
         secs.append({"id": s.get("id"), "name": s.get("name"), "time": s.get("time", 0), "questions": qs})
     return {"diagnostic_id": mock.id, "name": mock.name, "exam": mock.exam_code,
@@ -78,7 +82,7 @@ def start(db, learner, exam: str) -> dict:
         db.add(models.DiagnosticAttempt(learner_id=learner.id, exam_code=exam,
                                         mock_id=mock.id, status="in_progress"))
         db.commit()
-    return _paper(mock)
+    return _paper(db, mock)
 
 
 def _score_section(questions, answers) -> dict:

@@ -15,6 +15,7 @@ from ..deps import get_current_learner, get_db
 from ..schemas import LearnAnswerIn
 from ..services import knowledge_graph as kg
 from ..services import learning
+from ..services import media
 from ..services import notes
 
 router = APIRouter(prefix="/learn", tags=["learn"])
@@ -316,6 +317,7 @@ def concept_quiz(node_id: str, learner=Depends(get_current_learner), db: Session
             )
         ).all()
     )
+    img_keys = media.existing_keys(db, [it.item_id for it in items])
     questions = [
         {
             "id": it.item_id,
@@ -323,6 +325,7 @@ def concept_quiz(node_id: str, learner=Depends(get_current_learner), db: Session
             "difficulty": it.difficulty_d,
             "stem": it.stem,
             "options": it.options or [],
+            "image": media.resolve("", it.item_id, img_keys),
             "correct_answer": it.correct_answer,
             "solution": it.solution or "",
             "answered": it.item_id in answered,

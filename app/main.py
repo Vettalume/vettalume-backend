@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import settings
 from .db import init_db
 from .routers import (account, admin, analysis, auth, billing, catalog, diagnosis, diagnostic, ingest, learn,
-                      mocks, mocks_catalog, payments, practice, psychometrics, review)
+                      media, mocks, mocks_catalog, payments, practice, psychometrics, review)
 from .seed import seed_if_empty
 
 
@@ -94,6 +94,7 @@ app.include_router(review.router)
 app.include_router(review.honesty_router)
 app.include_router(account.router)
 app.include_router(admin.router)
+app.include_router(media.router)
 app.include_router(payments.router)
 
 
