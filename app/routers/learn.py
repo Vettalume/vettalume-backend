@@ -13,6 +13,7 @@ from .. import models
 from ..config import settings
 from ..deps import get_current_learner, get_db
 from ..schemas import LearnAnswerIn
+from ..services import billing
 from ..services import knowledge_graph as kg
 from ..services import learning
 from ..services import media
@@ -262,6 +263,7 @@ def concept_detail(node_id: str,
     node = db.get(models.KnowledgeNode, node_id)
     if node is None or node.kind != models.NodeKind.concept.value:
         raise HTTPException(404, f"unknown concept '{node_id}'")
+    billing.guard_content(db, learner, node)   # trial/free -> sample only (no-op unless enforcement on)
     cs = kg.concept_state(db, learner.id, node)
     content = node.theory or {}
     # Chunked/windowed delivery: return only the FIRST notes section + the total count. The rest are

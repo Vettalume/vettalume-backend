@@ -44,6 +44,31 @@ def grant_free(exam: str, learner=Depends(get_current_learner),
     return billing.grant_free_tier(db, learner, exam)
 
 
+class TrialIn(BaseModel):
+    exam: str
+
+
+@router.post("/start-trial")
+def start_trial(body: TrialIn, learner=Depends(get_current_learner),
+                db: Session = Depends(get_db)) -> dict:
+    """Start the one-time 7-day free trial for one exam (4 sectional mocks/section + 2 full + sample
+    content). 409 if already used, 400 if already paid. Called after 'Start Free Trial' signup."""
+    exam = (body.exam or "").upper()
+    if db.get(models.Exam, exam) is None:
+        raise HTTPException(404, f"unknown exam '{exam}'")
+    return billing.start_trial(db, learner, exam)
+
+
+@router.get("/trial-status")
+def trial_status(exam: str, learner=Depends(get_current_learner),
+                 db: Session = Depends(get_db)) -> dict:
+    """Trial state for the dashboard banner: tier, days left, quota used vs limits, can_start_trial."""
+    exam = (exam or "").upper()
+    if db.get(models.Exam, exam) is None:
+        raise HTTPException(404, f"unknown exam '{exam}'")
+    return billing.trial_status(db, learner, exam)
+
+
 @router.post("/purchase")
 def purchase(body: PurchaseIn, learner=Depends(get_current_learner),
              db: Session = Depends(get_db)) -> dict:

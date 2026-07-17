@@ -11,10 +11,10 @@ gated behind settings.enforce_entitlements so the open demo keeps working until 
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import models
@@ -53,12 +53,26 @@ _SUBSCRIPTION_PLANS = [
 ]
 
 
+# 7-day free trial, one per account per exam. Quotas live in limits; content="sample" = the sample set.
+_TRIAL_PLANS = [("CAT", "INR"), ("GMAT", "USD"), ("GRE", "USD")]
+_TRIAL_LIMITS = {"days": 7, "sectional_per_section": 4, "full_mocks": 2, "content": "sample"}
+CONTENT_SAMPLE_CONCEPTS = 3   # first N concepts per section unlocked for trial/free learners
+
+
 def ensure_catalog(db: Session) -> None:
     """Idempotently load the SKU catalog (safe to call on every boot)."""
     changed = False
     for spec in _CATALOG:
         if db.get(models.PricePlan, spec["code"]) is None:
             db.add(models.PricePlan(active=True, period="one_time", **spec))
+            changed = True
+    # Free-trial plans (kind="trial"): 7 days, 4 sectional mocks/section + 2 full mocks + sample content.
+    for exam, cur in _TRIAL_PLANS:
+        code = f"{exam.lower()}_trial"
+        if db.get(models.PricePlan, code) is None:
+            db.add(models.PricePlan(code=code, kind="trial", exam_code=exam, name=f"{exam} 7-Day Trial",
+                                    currency=cur, amount_cents=0, period="one_time", active=True,
+                                    limits=dict(_TRIAL_LIMITS)))
             changed = True
     # Month-wise access passes (fixed-term). Duration lives in limits.months; all INR (India audience).
     for code, exam, name, paise, months in _SUBSCRIPTION_PLANS:
@@ -86,17 +100,19 @@ def _entitlement(db: Session, account: models.Account, exam: str) -> models.Enti
 def entitlement_state(db: Session, account: models.Account, exam: str) -> dict:
     ent = _entitlement(db, account, exam)
     status = ent.status if ent else None
-    if status == "active":
-        # A subscription-backed entitlement is valid only while a subscription is live. An admin
-        # manual grant (no Subscription row at all) is permanent and is left untouched.
+    if status in ("active", "trial"):
+        # A subscription-backed entitlement (paid OR trial) is valid only while a subscription is live.
+        # An admin manual grant (no Subscription row at all) is permanent and is left untouched.
         has_sub = db.scalar(select(models.Subscription.id).where(
             models.Subscription.account_id == account.id,
             models.Subscription.exam_code == exam).limit(1))
         if has_sub is not None and active_subscription(db, account, exam) is None:
-            status = "expired"
-    tier = "paid" if status == "active" else ("free" if status == "free" else None)
+            status = "expired"       # trial ran out / subscription lapsed
+    tier = ("paid" if status == "active" else "trial" if status == "trial"
+            else "free" if status == "free" else None)
     return {"exam": exam, "status": status, "tier": tier,
-            "entitled": status in ("free", "active"), "paid": status == "active"}
+            "entitled": status in ("free", "active", "trial"),
+            "paid": status == "active", "trial": status == "trial"}
 
 
 def active_subscription(db: Session, account: models.Account, exam: str):
@@ -265,6 +281,180 @@ def enforce(db: Session, account: models.Account, exam: str, *, need: str = "any
             raise HTTPException(402, {"error": "free_tier_limit_reached", "resource": resource,
                                       "exam": exam, "see": "/billing/catalog"})
     return state
+
+
+# ----------------------------- free trial (7-day, one per account per exam) -----------------------------
+
+def _trial_code(exam: str) -> str:
+    return f"{exam.lower()}_trial"
+
+
+def _trial_plan(db: Session, exam: str):
+    return db.get(models.PricePlan, _trial_code(exam))
+
+
+def _trial_days(db: Session, exam: str) -> int:
+    p = _trial_plan(db, exam)
+    try:
+        return int((p.limits or {}).get("days", 7)) if p else 7
+    except (TypeError, ValueError):
+        return 7
+
+
+def has_used_trial(db: Session, account: models.Account, exam: str) -> bool:
+    """True if this account ever started a trial for this exam (live OR expired) — trials are one-shot."""
+    return db.scalar(select(models.Subscription.id).where(
+        models.Subscription.account_id == account.id,
+        models.Subscription.exam_code == exam,
+        models.Subscription.plan_code == _trial_code(exam)).limit(1)) is not None
+
+
+def _count_full_attempts(db: Session, account: models.Account, exam: str) -> int:
+    return db.scalar(select(func.count(models.MockAttempt.id)).where(
+        models.MockAttempt.learner_id == account.id,
+        models.MockAttempt.exam_code == exam,
+        models.MockAttempt.mock_type == "full")) or 0
+
+
+def _count_sectional_attempts(db: Session, account: models.Account, exam: str, section_key) -> int:
+    return db.scalar(select(func.count(models.MockAttempt.id)).where(
+        models.MockAttempt.learner_id == account.id,
+        models.MockAttempt.exam_code == exam,
+        models.MockAttempt.mock_type == "sectional",
+        models.MockAttempt.section_key == section_key)) or 0
+
+
+def start_trial(db: Session, account: models.Account, exam: str) -> dict:
+    """Grant a one-time 7-day trial for ONE exam (a short Subscription + a 'trial' entitlement).
+    Rejects if the exam is already paid, or the trial was already used for this exam. Idempotent while
+    a trial is live (returns the current status)."""
+    exam = (exam or "").upper()
+    plan = _trial_plan(db, exam)
+    if plan is None:
+        raise HTTPException(404, f"no trial plan for '{exam}'")
+    st = entitlement_state(db, account, exam)
+    if st["paid"]:
+        raise HTTPException(400, {"error": "already_entitled",
+                                  "detail": "You already have paid access to this exam."})
+    if st["trial"]:
+        return trial_status(db, account, exam)             # already on trial -> idempotent
+    if has_used_trial(db, account, exam):
+        raise HTTPException(409, {"error": "trial_already_used",
+                                  "detail": "You've already used your free trial for this exam."})
+    now = datetime.utcnow()
+    expires = now + timedelta(days=_trial_days(db, exam))
+    db.add(models.Subscription(account_id=account.id, exam_code=exam, plan_code=plan.code,
+                               started_at=now, expires_at=expires, status="active"))
+    _upsert_entitlement(db, account, exam, "trial")
+    prof = db.get(models.StudentProfile, account.id)
+    if prof is not None and prof.reg_type == "registered":
+        prof.reg_type = "trial"
+    db.commit()
+    from . import warmstart
+    warmstart.warm_start(db, account, exam, persist=True)
+    return trial_status(db, account, exam)
+
+
+def trial_status(db: Session, account: models.Account, exam: str) -> dict:
+    """Trial state for the dashboard: days left + per-resource usage vs the trial quotas."""
+    exam = (exam or "").upper()
+    st = entitlement_state(db, account, exam)
+    limits = ((_trial_plan(db, exam).limits if _trial_plan(db, exam) else {}) or {})
+    on_trial = st["tier"] == "trial"
+    sub = active_subscription(db, account, exam) if on_trial else None
+    days_left, expires_at = None, None
+    if sub is not None:
+        expires_at = sub.expires_at.isoformat()
+        secs = int((sub.expires_at - datetime.utcnow()).total_seconds())
+        days_left = max(0, -(-secs // 86400))              # ceil to whole days
+    sections = db.scalars(select(models.Section).where(models.Section.exam_code == exam)).all()
+    sectional_used = {s.key: _count_sectional_attempts(db, account, exam, s.key) for s in sections}
+    return {
+        "exam": exam, "tier": st["tier"], "status": st["status"],
+        "on_trial": on_trial, "paid": st["paid"],
+        "can_start_trial": (not st["paid"]) and (not st["trial"]) and not has_used_trial(db, account, exam),
+        "days_left": days_left, "expires_at": expires_at,
+        "limits": {"sectional_per_section": limits.get("sectional_per_section"),
+                   "full_mocks": limits.get("full_mocks"), "content": limits.get("content")},
+        "used": {"full_mocks": _count_full_attempts(db, account, exam), "sectional": sectional_used},
+    }
+
+
+def _limit_for_tier(db: Session, exam: str, tier: str, resource: str):
+    if tier == "trial":
+        plan = _trial_plan(db, exam)
+    elif tier == "free":
+        plan = db.scalar(select(models.PricePlan).where(
+            models.PricePlan.exam_code == exam, models.PricePlan.kind == "free"))
+    else:
+        plan = None
+    return (plan.limits or {}).get(resource) if plan else None
+
+
+def _tier_or_lock(db: Session, account: models.Account, exam: str) -> dict:
+    """Resolve the tier for a gated surface. Expired (trial/paid lapsed) -> 402 upgrade. A brand-new
+    learner (no entitlement) is granted the free tier so the free experience keeps working."""
+    st = entitlement_state(db, account, exam)
+    if st["status"] == "expired":
+        raise HTTPException(402, {"error": "upgrade_required", "exam": exam, "see": "/pricing",
+                                  "detail": "Your access to this exam has ended. Upgrade to keep going."})
+    if st["status"] is None:
+        st = grant_free_tier(db, account, exam)
+    return st
+
+
+def guard_mock_start(db: Session, account: models.Account, mock) -> None:
+    """Raise 402 if starting this mock exceeds the learner's tier limits. No-op unless enforcement is on.
+    paid: unlimited. trial: 4 sectional/section + 2 full. free: the free plan's full_mocks cap. expired: locked."""
+    if not settings.enforce_entitlements:
+        return
+    exam = (mock.exam_code or "").upper()
+    st = _tier_or_lock(db, account, exam)
+    if st["paid"]:
+        return
+    is_full = (mock.type or "").lower() == "full"
+    err = "trial_limit_reached" if st["trial"] else "free_tier_limit_reached"
+    if is_full:
+        limit = _limit_for_tier(db, exam, st["tier"], "full_mocks")
+        if limit is not None and _count_full_attempts(db, account, exam) >= limit:
+            raise HTTPException(402, {"error": err, "resource": "full_mocks", "exam": exam,
+                                      "limit": limit, "see": "/pricing"})
+    else:
+        from .student_mocks import _primary_section_key
+        sk = _primary_section_key(mock)
+        limit = _limit_for_tier(db, exam, st["tier"], "sectional_per_section")
+        if limit is not None and _count_sectional_attempts(db, account, exam, sk) >= limit:
+            raise HTTPException(402, {"error": err, "resource": "sectional_mocks", "section": sk,
+                                      "exam": exam, "limit": limit, "see": "/pricing"})
+
+
+def _sample_concept_ids(db: Session, exam: str) -> set[str]:
+    """The trial/free 'sample' set: the first CONTENT_SAMPLE_CONCEPTS concept nodes (by creation order)
+    in each section. Deterministic default; admins can widen it later."""
+    ids: set[str] = set()
+    for s in db.scalars(select(models.Section).where(models.Section.exam_code == exam)).all():
+        rows = db.scalars(select(models.KnowledgeNode.id).where(
+            models.KnowledgeNode.section_id == s.id,
+            models.KnowledgeNode.kind == models.NodeKind.concept.value,
+        ).order_by(models.KnowledgeNode.created_at.asc()).limit(CONTENT_SAMPLE_CONCEPTS)).all()
+        ids.update(rows)
+    return ids
+
+
+def guard_content(db: Session, account: models.Account, node) -> None:
+    """Raise 402 if a trial/free learner opens a concept outside the sample set. No-op unless enforcement
+    is on; paid learners get everything; topic/chapter nodes (navigation) always pass."""
+    if not settings.enforce_entitlements:
+        return
+    if getattr(node, "kind", None) != models.NodeKind.concept.value:
+        return
+    exam = (node.exam_code or "").upper()
+    st = _tier_or_lock(db, account, exam)
+    if st["paid"]:
+        return
+    if node.id not in _sample_concept_ids(db, exam):
+        raise HTTPException(402, {"error": "content_locked", "exam": exam, "see": "/pricing",
+                                  "detail": "This chapter is available on a paid plan. Upgrade to unlock all content."})
 
 
 def validate_coupon(db, code: str, exam: str | None = None, amount: int = 0) -> dict:

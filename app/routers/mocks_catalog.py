@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..deps import get_current_learner, get_db
-from ..services import student_mocks
+from ..services import billing, student_mocks
 
 router = APIRouter(prefix="/mocks", tags=["mocks"])
 
@@ -71,7 +71,11 @@ def mock_summary(exam: str,
 
 @router.get("/{mid}")
 def get_mock(mid: str, learner=Depends(get_current_learner), db: Session = Depends(get_db)) -> dict:
-    """The paper to take — sections + questions with the answer key stripped."""
+    """The paper to take — sections + questions with the answer key stripped. Trial/free learners are
+    gated here: over quota or past the trial window returns 402 (frontend shows an upgrade prompt)."""
+    mock = db.get(models.Mock, mid)
+    if mock is not None:
+        billing.guard_mock_start(db, learner, mock)   # no-op unless enforce_entitlements is on
     return student_mocks.paper(db, mid)
 
 
