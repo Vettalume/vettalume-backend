@@ -1,8 +1,9 @@
-"""Server-side login sessions with sliding-window inactivity expiry (Phase 16).
+"""Server-side login sessions with sliding-window inactivity expiry + an absolute cap (Phase 16).
 
-A session is valid while it has been used within `session_inactivity_days`. Every authenticated request
-calls resolve(), which bumps last_seen_at (throttled), so an active student stays signed in while one
-who is away for 2 whole days is auto-logged-out. The bearer token IS the session id (opaque random).
+A session is valid while it has been used within `session_inactivity_days` (idle window, bumped on
+every request) AND is younger than `session_max_days` (absolute cap from login). So an active student
+stays signed in until the 7-day cap; one who is away/asleep for ~a day is auto-logged-out sooner. The
+bearer token IS the session id (opaque random).
 """
 from __future__ import annotations
 
@@ -24,11 +25,17 @@ def create(db, account: "models.Account") -> str:
 
 
 def resolve(db, token: str):
-    """Account for a live session (and refresh it), or None if missing / revoked / idle-expired."""
+    """Account for a live session (and refresh it), or None if missing / revoked / expired.
+
+    Two independent expiries: an absolute cap from login (`session_max_days`, unaffected by activity)
+    and a sliding idle window (`session_inactivity_days`, reset on every request). Active use keeps a
+    session alive until the absolute cap; going idle (e.g. sleep / a day away) auto-logs-out sooner."""
     s = db.get(models.AuthSession, token)
     if s is None or s.revoked:
         return None
     now = datetime.utcnow()
+    if (now - s.created_at) > timedelta(days=settings.session_max_days):
+        return None                       # absolute max age -> must re-login even if active
     if (now - s.last_seen_at) > timedelta(days=settings.session_inactivity_days):
         return None                       # idle too long -> auto-logout
     if (now - s.last_seen_at).total_seconds() > 60:   # throttle writes to ~once/min

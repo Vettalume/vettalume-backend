@@ -31,7 +31,10 @@ class Settings(BaseSettings):
     razorpay_webhook_secret: str = ""
 
     # --- student auth: sliding sessions, email OTP, Google sign-in ---
-    session_inactivity_days: int = 2            # auto-logout after this many idle days (sliding window)
+    # Idle (sliding) window: no activity for this long -> auto-logout (covers sleep / 24h away).
+    session_inactivity_days: int = 1
+    # Absolute cap from login: you must sign in again after this many days no matter how active.
+    session_max_days: int = 7
     otp_ttl_seconds: int = 600                  # an OTP code is valid for 10 minutes
     otp_resend_cooldown_seconds: int = 30       # minimum gap between OTP sends (the 30s resend timer)
     otp_max_attempts: int = 5                   # wrong tries before a code is burned

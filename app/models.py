@@ -412,9 +412,10 @@ class EmailOtp(Base):
 
 
 class AuthSession(Base):
-    """A server-side login session. The bearer token IS the id (an opaque random string). Sliding
-    expiry: a session is valid while `now - last_seen_at <= session_inactivity_days`; every request
-    bumps last_seen_at, so 2 idle days auto-logs-out while active use stays signed in indefinitely."""
+    """A server-side login session. The bearer token IS the id (an opaque random string). Two
+    expiries: a sliding idle window (`now - last_seen_at <= session_inactivity_days`, bumped on every
+    request) and an absolute cap (`now - created_at <= session_max_days`). Active use stays signed in
+    until the absolute cap; ~a day idle (sleep / away) auto-logs-out sooner."""
     __tablename__ = "auth_sessions"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)        # opaque session token
     account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
