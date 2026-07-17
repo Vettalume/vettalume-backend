@@ -26,7 +26,7 @@ from .. import models
 from ..config import settings
 from ..deps import get_db
 from ..schemas import IngestReport, ItemIn
-from ..services import html_sanitize, ingestion, knowledge_graph as kg, question_bank
+from ..services import html_sanitize, ingestion, knowledge_graph as kg, question_bank, security
 from ..services.admin_auth import grant_admin, require_admin, revoke_admin
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -428,11 +428,41 @@ def list_admins(db: Session = Depends(get_db)) -> list[dict]:
 
 class GrantIn(BaseModel):
     email: str
+    password: Optional[str] = None
+    display_name: Optional[str] = ""
 
 
 @router.post("/admins")
 def grant(body: GrantIn, db: Session = Depends(get_db)) -> dict:
-    acc = grant_admin(db, body.email)
+    """Add an admin. With a password, creates the account (or resets its password) and grants admin —
+    so an admin can mint new admins from the portal. Without a password, grants admin to an account
+    that already exists (the original behaviour)."""
+    email = (body.email or "").strip().lower()
+    if not email:
+        raise HTTPException(400, "email is required")
+
+    if body.password:
+        if len(body.password) < 8:
+            raise HTTPException(400, "password must be at least 8 characters")
+        pw_hash = security.hash_password(body.password)
+        acc = db.scalar(select(models.Account).where(models.Account.email == email))
+        if acc is None:
+            acc = models.Account(id=uuid.uuid4(), email=email, display_name=(body.display_name or "Admin"))
+            db.add(acc)
+            db.flush()
+            db.add(models.Credential(account_id=acc.id, password_hash=pw_hash))
+        else:
+            cred = db.get(models.Credential, acc.id)
+            if cred is None:
+                db.add(models.Credential(account_id=acc.id, password_hash=pw_hash))
+            else:
+                cred.password_hash = pw_hash
+        if db.get(models.AdminUser, acc.id) is None:
+            db.add(models.AdminUser(account_id=acc.id, role="admin"))
+        db.commit()
+        return {"ok": True, "account_id": str(acc.id), "email": acc.email}
+
+    acc = grant_admin(db, email)
     return {"ok": True, "account_id": str(acc.id), "email": acc.email}
 
 
