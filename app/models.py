@@ -411,6 +411,16 @@ class EmailOtp(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class LoginThrottle(Base):
+    """Per-account failed-password counter for brute-force defence on /auth/login. After
+    login_max_attempts wrong tries the account is locked until locked_until; a correct login clears it."""
+    __tablename__ = "login_throttle"
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True)
+    fail_count: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # naive UTC
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class AuthSession(Base):
     """A server-side login session. The bearer token IS the id (an opaque random string). Two
     expiries: a sliding idle window (`now - last_seen_at <= session_inactivity_days`, bumped on every

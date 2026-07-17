@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -48,9 +48,32 @@ def _auth_response(acct: models.Account) -> dict:
             "account": {"id": str(acct.id), "email": acct.email, "display_name": acct.display_name}}
 
 
-def _session_response(db: Session, acct: models.Account) -> dict:
-    """New sliding-session response: an opaque token valid until 2 idle days pass."""
+def _set_session_cookie(response: Response, token: str) -> None:
+    """Set the session token as a Secure, HttpOnly cookie — but only when SESSION_COOKIE_DOMAIN is
+    configured (a shared parent domain). While it's empty (default) this is a no-op and auth stays
+    header-only, so today's cross-domain setup is unaffected."""
+    domain = settings.session_cookie_domain.strip()
+    if not domain:
+        return
+    response.set_cookie(
+        key=settings.session_cookie_name, value=token,
+        max_age=settings.session_max_days * 86400,
+        httponly=True, secure=True, samesite="lax", domain=domain, path="/",
+    )
+
+
+def _clear_session_cookie(response: Response) -> None:
+    domain = settings.session_cookie_domain.strip()
+    if domain:
+        response.delete_cookie(settings.session_cookie_name, domain=domain, path="/")
+
+
+def _session_response(db: Session, acct: models.Account, response: Response | None = None) -> dict:
+    """New sliding-session response: an opaque, device-bound token (valid until 24h idle / 7-day cap).
+    Also sets it as an HttpOnly cookie when cookie auth is enabled (SESSION_COOKIE_DOMAIN)."""
     token = sessions.create(db, acct)
+    if response is not None:
+        _set_session_cookie(response, token)
     return {"access_token": token, "token_type": "bearer", "learner_id": str(acct.id),
             "account": {"id": str(acct.id), "email": acct.email, "display_name": acct.display_name}}
 
@@ -75,21 +98,51 @@ def _touch_last_login(db: Session, acct: "models.Account") -> None:
     db.commit()
 
 
+def _record_login_failure(db: Session, account_id, now: datetime) -> None:
+    """Count a wrong-password attempt for a known account; lock it once the limit is hit."""
+    t = db.get(models.LoginThrottle, account_id)
+    if t is None:
+        t = models.LoginThrottle(account_id=account_id, fail_count=0)
+        db.add(t)
+    t.fail_count = (t.fail_count or 0) + 1
+    t.updated_at = now
+    if t.fail_count >= settings.login_max_attempts:
+        t.locked_until = now + timedelta(minutes=settings.login_lockout_minutes)
+        t.fail_count = 0   # the lockout window is the penalty; start fresh after it passes
+    db.commit()
+
+
 @router.post("/login")
-def login(body: LoginIn, db: Session = Depends(get_db)) -> dict:
-    """Email + password sign-in. Returns a 2-day sliding session token. New-flow accounts must have
-    verified their email first; legacy accounts (no auth metadata) are grandfathered in."""
+def login(body: LoginIn, response: Response, db: Session = Depends(get_db)) -> dict:
+    """Email + password sign-in. Returns a device-bound sliding session token. New-flow accounts must
+    have verified their email first; legacy accounts (no auth metadata) are grandfathered in. Repeated
+    wrong passwords temporarily lock the account (brute-force defence)."""
     acct = db.scalar(select(models.Account).where(models.Account.email == body.email))
     cred = db.get(models.Credential, acct.id) if acct else None
+    now = datetime.utcnow()
+
+    # Brute-force lockout (only meaningful for a real account; unknown emails hit the generic 401).
+    throttle = db.get(models.LoginThrottle, acct.id) if acct else None
+    if throttle is not None and throttle.locked_until is not None and now < throttle.locked_until:
+        mins = int((throttle.locked_until - now).total_seconds() // 60) + 1
+        raise HTTPException(429, {"error": "account_locked",
+                                  "detail": f"Too many failed attempts. Try again in about {mins} minute(s)."})
+
     if acct is None or cred is None or not security.verify_password(body.password, cred.password_hash):
+        if acct is not None:
+            _record_login_failure(db, acct.id, now)
         raise HTTPException(401, "invalid email or password")   # one message -> no account enumeration
+
     meta = db.get(models.AccountAuth, acct.id)
     prof = db.get(models.StudentProfile, acct.id)
     if meta is not None and meta.provider == "password" and prof is not None and not prof.verified:
         raise HTTPException(403, {"error": "email_not_verified",
                                   "detail": "Please verify your email before signing in."})
+    if throttle is not None and (throttle.fail_count or throttle.locked_until):
+        throttle.fail_count, throttle.locked_until, throttle.updated_at = 0, None, now  # clear on success
+        db.commit()
     _touch_last_login(db, acct)
-    return _session_response(db, acct)
+    return _session_response(db, acct, response)
 
 
 @router.get("/me")
@@ -219,7 +272,7 @@ class VerifyEmailIn(BaseModel):
 
 
 @router.post("/verify-email")
-def verify_email(body: VerifyEmailIn, db: Session = Depends(get_db)) -> dict:
+def verify_email(body: VerifyEmailIn, response: Response, db: Session = Depends(get_db)) -> dict:
     """Check the OTP. On success: mark verified, send the welcome email, return a session token."""
     acct = db.scalar(select(models.Account).where(models.Account.email == body.email))
     row = db.get(models.EmailOtp, acct.id) if acct else None
@@ -243,7 +296,7 @@ def verify_email(body: VerifyEmailIn, db: Session = Depends(get_db)) -> dict:
     db.delete(row)
     db.commit()
     email_svc.send_welcome(acct.email, acct.display_name or "there")
-    return _session_response(db, acct)
+    return _session_response(db, acct, response)
 
 
 class EmailIn(BaseModel):
@@ -297,7 +350,7 @@ class ResetPasswordIn(BaseModel):
 
 
 @router.post("/reset-password")
-def reset_password(body: ResetPasswordIn, db: Session = Depends(get_db)) -> dict:
+def reset_password(body: ResetPasswordIn, response: Response, db: Session = Depends(get_db)) -> dict:
     """Verify the reset OTP and set a new password. On success returns a fresh session token."""
     problems = security.password_problems(body.new_password, MIN_PASSWORD_LEN)
     if problems:
@@ -328,7 +381,7 @@ def reset_password(body: ResetPasswordIn, db: Session = Depends(get_db)) -> dict
         cred.password_hash = security.hash_password(body.new_password)
     db.delete(row)
     db.commit()
-    return _session_response(db, acct)
+    return _session_response(db, acct, response)
 
 
 # ----------------------------- self-service profile (new) -----------------------------
@@ -407,7 +460,7 @@ class GoogleIn(BaseModel):
 
 
 @router.post("/google")
-def google_signin(body: GoogleIn, db: Session = Depends(get_db)) -> dict:
+def google_signin(body: GoogleIn, response: Response, db: Session = Depends(get_db)) -> dict:
     """Sign up or sign in with Google. Verifies the ID token, then links/creates the account. Google
     accounts skip OTP (Google already verified the email)."""
     info = google_auth.verify_id_token(body.id_token)
@@ -442,7 +495,7 @@ def google_signin(body: GoogleIn, db: Session = Depends(get_db)) -> dict:
         db.commit()
 
     _touch_last_login(db, acct)
-    return _session_response(db, acct)
+    return _session_response(db, acct, response)
 
 
 # ----------------------------- change password -----------------------------
@@ -480,12 +533,18 @@ def change_password(body: ChangePasswordIn, authorization: str | None = Header(N
 
 # ----------------------------- logout -----------------------------
 @router.post("/logout")
-def logout(authorization: str | None = Header(None), db: Session = Depends(get_db)) -> dict:
-    """Revoke the current session token (no-op for legacy JWTs, which simply expire)."""
+def logout(response: Response, authorization: str | None = Header(None),
+           vls_session: str | None = Cookie(None), db: Session = Depends(get_db)) -> dict:
+    """Revoke the current session token (from header or cookie) and clear the session cookie.
+    No-op for legacy JWTs, which simply expire."""
+    tok = None
     if authorization and authorization.lower().startswith("bearer "):
         tok = authorization.split(" ", 1)[1].strip()
-        if tok.startswith("vls_"):
-            sessions.revoke(db, tok)
+    elif vls_session:
+        tok = vls_session.strip()
+    if tok and tok.startswith("vls_"):
+        sessions.revoke(db, tok)
+    _clear_session_cookie(response)
     return {"status": "logged_out"}
 
 

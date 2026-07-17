@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Cookie, Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -38,11 +38,16 @@ def is_admin(db: Session, account: models.Account | None) -> bool:
 def require_admin(
     authorization: str | None = Header(None, description="Bearer <JWT> for an admin account"),
     user_agent: str | None = Header(None),
+    vls_session: str | None = Cookie(None),
     db: Session = Depends(get_db),
 ) -> models.Account:
-    if not (authorization and authorization.lower().startswith("bearer ")):
+    token = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+    elif vls_session:
+        token = vls_session.strip()
+    if not token:
         raise HTTPException(status_code=401, detail="admin login required")
-    token = authorization.split(" ", 1)[1].strip()
     # New sliding-session tokens are server-side, device-bound and unforgeable (you can't claim another
     # account's id, unlike the rejected X-Learner-Id header), so they're safe to accept here.
     if token.startswith("vls_"):

@@ -35,6 +35,16 @@ class Settings(BaseSettings):
     session_inactivity_days: int = 1
     # Absolute cap from login: you must sign in again after this many days no matter how active.
     session_max_days: int = 7
+    # Brute-force guard on password login (/auth/login): after this many wrong tries the account is
+    # temporarily locked for login_lockout_minutes. A correct login resets the counter.
+    login_max_attempts: int = 8
+    login_lockout_minutes: int = 15
+    # HttpOnly-cookie session auth (defence-in-depth: the token isn't readable by JS / devtools / XSS).
+    # Empty => disabled (Authorization-header auth only, unchanged). Set to a shared parent domain
+    # (e.g. ".vettalume.com") once the web app and API are on sibling subdomains; the session token then
+    # rides in a Secure, HttpOnly, SameSite=Lax cookie instead of localStorage. See SECURITY notes.
+    session_cookie_domain: str = ""
+    session_cookie_name: str = "vls_session"
     otp_ttl_seconds: int = 600                  # an OTP code is valid for 10 minutes
     otp_resend_cooldown_seconds: int = 30       # minimum gap between OTP sends (the 30s resend timer)
     otp_max_attempts: int = 5                   # wrong tries before a code is burned
