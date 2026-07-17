@@ -422,6 +422,10 @@ class AuthSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Device binding: sha256 of the User-Agent that first used this session. A token replayed from a
+    # different browser (e.g. copied out of devtools) won't match and is rejected. Nullable so sessions
+    # created before this feature bind on their next request.
+    ua_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
 
 class AccountAuth(Base):

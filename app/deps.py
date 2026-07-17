@@ -32,15 +32,16 @@ def _account_by_id(db: Session, raw) -> Account:
 def get_current_learner(
     authorization: str | None = Header(None, description="Bearer <JWT> from /auth/login or /auth/register"),
     x_learner_id: str | None = Header(None, description="Legacy dev auth (the learner_id from /auth/dev-login)"),
+    user_agent: str | None = Header(None),
     db: Session = Depends(get_db),
 ) -> Account:
     """Resolve the calling learner. A real Bearer JWT is preferred; the Phase-0 X-Learner-Id header is
     still accepted for dev unless settings.require_jwt is on (then JWT is mandatory)."""
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization.split(" ", 1)[1].strip()
-        # New student auth issues opaque session tokens (sliding 2-day inactivity expiry).
+        # New student auth issues opaque session tokens (device-bound, sliding expiry + 7-day cap).
         if token.startswith("vls_"):
-            acct = sessions.resolve(db, token)
+            acct = sessions.resolve(db, token, user_agent)
             if acct is None:
                 raise HTTPException(status_code=401, detail="session expired or invalid")
             return acct

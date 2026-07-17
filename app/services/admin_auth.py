@@ -37,15 +37,16 @@ def is_admin(db: Session, account: models.Account | None) -> bool:
 
 def require_admin(
     authorization: str | None = Header(None, description="Bearer <JWT> for an admin account"),
+    user_agent: str | None = Header(None),
     db: Session = Depends(get_db),
 ) -> models.Account:
     if not (authorization and authorization.lower().startswith("bearer ")):
         raise HTTPException(status_code=401, detail="admin login required")
     token = authorization.split(" ", 1)[1].strip()
-    # New sliding-session tokens are server-side and unforgeable (you can't claim another account's
-    # id, unlike the rejected X-Learner-Id header), so they're safe to accept here.
+    # New sliding-session tokens are server-side, device-bound and unforgeable (you can't claim another
+    # account's id, unlike the rejected X-Learner-Id header), so they're safe to accept here.
     if token.startswith("vls_"):
-        acc = sessions.resolve(db, token)
+        acc = sessions.resolve(db, token, user_agent)
         if acc is None:
             raise HTTPException(status_code=401, detail="session expired or invalid")
     else:

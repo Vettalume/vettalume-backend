@@ -15,6 +15,25 @@ from .routers import (account, admin, analysis, auth, billing, catalog, contact,
 from .seed import seed_if_empty
 
 
+def _ensure_optional_columns(engine) -> None:
+    """Add additive nullable columns that post-date the original CREATE TABLE. create_all() never
+    alters an existing table, and there's no migration framework, so each column is applied here
+    idempotently (safe to run on every boot; ignored where it already exists)."""
+    from sqlalchemy import text
+
+    is_pg = settings.database_url.startswith("postgres")
+    # (table, column, type)
+    additive = [("auth_sessions", "ua_hash", "VARCHAR(64)")]
+    for table, col, coltype in additive:
+        stmt = (f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {coltype}" if is_pg
+                else f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(stmt))
+        except Exception:
+            pass  # already present (fresh DB built by create_all, or a prior boot added it)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Boot init (create_all + seed + mount + ensure_admins) must run exactly once even when many
@@ -45,6 +64,7 @@ async def lifespan(app: FastAPI):
         lock_conn.commit()
     try:
         init_db()
+        _ensure_optional_columns(engine)
         seed_if_empty()
         from .services import billing, mount
         from .services.admin_auth import ensure_admins
