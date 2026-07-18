@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     dev_mode: bool = True
     serve_only_approved: bool = True   # False (SERVE_ONLY_APPROVED=false) -> serve drafts too (testing)
     zpd_use_prereqs: bool = True       # False (ZPD_USE_PREREQS=false) -> ZPD ignores prerequisites
-    enforce_entitlements: bool = False  # True -> billing guards bite (paid + free-tier limits); off keeps the demo open
+    enforce_entitlements: bool = True   # billing guards bite (tier/plan limits); set ENFORCE_ENTITLEMENTS=false to reopen the demo
     jwt_secret: str = "dev-insecure-change-me"   # MUST be overridden in production (env JWT_SECRET)
     jwt_expiry_seconds: int = 604800             # 7 days
     require_jwt: bool = False                    # True -> only Bearer JWT accepted (legacy X-Learner-Id disabled)

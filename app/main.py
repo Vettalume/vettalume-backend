@@ -67,12 +67,13 @@ async def lifespan(app: FastAPI):
         _ensure_optional_columns(engine)
         seed_if_empty()
         from .services import billing, mount
-        from .services.admin_auth import ensure_admins
+        from .services.admin_auth import ensure_admins, grant_admins_full_access
         _db = SessionLocal()
         try:
             billing.ensure_catalog(_db)
             mount.mount_gmat_gre_if_empty(_db)
             ensure_admins(_db)  # promote ADMIN_EMAILS accounts that already exist
+            grant_admins_full_access(_db)  # admins get all-exam access (abhishek etc.)
         finally:
             _db.close()
     finally:

@@ -87,6 +87,30 @@ def ensure_admins(db: Session) -> int:
     return n
 
 
+def grant_admins_full_access(db: Session) -> int:
+    """Every admin (an AdminUser row or an ADMIN_EMAILS account) gets an active entitlement for every
+    exam, so they can access all content/mocks regardless of enforcement. Idempotent; runs on boot."""
+    admin_ids = {a.account_id for a in db.scalars(select(models.AdminUser)).all()}
+    emails = _admin_email_set()
+    if emails:
+        for acc in db.scalars(select(models.Account)).all():
+            if acc.email and acc.email.lower() in emails:
+                admin_ids.add(acc.id)
+    exams = [e.code for e in db.scalars(select(models.Exam)).all()]
+    n = 0
+    for aid in admin_ids:
+        for ex in exams:
+            ent = db.scalar(select(models.Entitlement).where(
+                models.Entitlement.account_id == aid, models.Entitlement.exam_code == ex))
+            if ent is None:
+                db.add(models.Entitlement(account_id=aid, exam_code=ex, status="active")); n += 1
+            elif ent.status != "active":
+                ent.status = "active"; n += 1
+    if n:
+        db.commit()
+    return n
+
+
 def grant_admin(db: Session, email: str) -> models.Account:
     acc = db.scalar(select(models.Account).where(models.Account.email == email.strip().lower()))
     if acc is None:
