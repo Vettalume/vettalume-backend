@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..deps import get_current_learner, get_db
 from ..schemas import AnswerIn, AnswerOut, ItemPublic, NodeStateOut, StateOut
-from ..services import analytics, learning
+from ..services import analytics, billing, learning
 from ..services.state import eligible_items, node_attempt_count, record_response
 
 router = APIRouter(prefix="/practice", tags=["practice"])
@@ -24,6 +24,7 @@ def practice_session(exam: str, topic: Optional[str] = None, topic_id: Optional[
     exam = (exam or "").upper()
     if db.get(models.Exam, exam) is None:
         raise HTTPException(404, f"unknown exam '{exam}'")
+    billing.guard_practice(db, learner, exam)   # adaptive practice is a paid feature (no-op unless enforcing)
     node = analytics.resolve_chapter(db, exam, topic, topic_id)
     if node is None:
         raise HTTPException(404, f"no chapter '{topic or topic_id}' in exam '{exam}'")
@@ -39,6 +40,7 @@ def practice_adaptive(exam: str, topic: Optional[str] = None, topic_id: Optional
     exam = (exam or "").upper()
     if db.get(models.Exam, exam) is None:
         raise HTTPException(404, f"unknown exam '{exam}'")
+    billing.guard_practice(db, learner, exam)   # adaptive practice is a paid feature (no-op unless enforcing)
     node = analytics.resolve_chapter(db, exam, topic, topic_id)
     if node is None:
         raise HTTPException(404, f"no chapter '{topic or topic_id}' in exam '{exam}'")

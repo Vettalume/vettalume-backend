@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..deps import get_current_learner, get_db
-from ..services import diagnostic
+from ..services import billing, diagnostic
 
 router = APIRouter(prefix="/diagnostic", tags=["diagnostic"])
 
@@ -28,6 +28,7 @@ def get_status(exam: str, learner=Depends(get_current_learner), db: Session = De
 @router.post("/start")
 def start(exam: str, learner=Depends(get_current_learner), db: Session = Depends(get_db)) -> dict:
     """Fetch the diagnostic paper (no answers). 409 if the learner has already completed it."""
+    billing.guard_diagnostic(db, learner, exam)   # gated by plan (no-op unless enforcing; all tiers include it)
     return diagnostic.start(db, learner, exam)
 
 

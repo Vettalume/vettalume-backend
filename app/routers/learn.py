@@ -303,6 +303,7 @@ def concept_quiz(node_id: str, learner=Depends(get_current_learner), db: Session
     node = db.get(models.KnowledgeNode, node_id)
     if node is None or node.kind != models.NodeKind.concept.value:
         raise HTTPException(404, f"unknown concept '{node_id}'")
+    billing.guard_content(db, learner, node)   # same content lock as the notes (no-op unless enforcing)
     # stable order so "resume" is consistent across visits
     items = db.scalars(
         select(models.Item).where(

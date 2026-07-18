@@ -20,67 +20,109 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..config import settings
 
-# One coherent catalog. Prices are illustrative; the point is multi-currency + tiers + a bundle.
-_CATALOG = [
-    dict(code="gmat_free", kind="free", exam_code="GMAT", name="GMAT Free",
-         currency="USD", amount_cents=0, limits={"full_mocks": 1, "debrief": "summary"}),
-    dict(code="gmat_summit", kind="paid", exam_code="GMAT", name="GMAT Summit",
-         currency="USD", amount_cents=19900, limits=None),
-    dict(code="gre_free", kind="free", exam_code="GRE", name="GRE Free",
-         currency="USD", amount_cents=0, limits={"full_mocks": 2, "debrief": "summary"}),
-    dict(code="gre_core", kind="paid", exam_code="GRE", name="GRE Core",
-         currency="USD", amount_cents=14900, limits=None),
-    dict(code="cat_free", kind="free", exam_code="CAT", name="CAT Free",
-         currency="INR", amount_cents=0, limits={"full_mocks": 1, "debrief": "summary"}),
-    dict(code="cat_pro", kind="paid", exam_code="CAT", name="CAT Pro",
-         currency="INR", amount_cents=1499900, limits=None),
-    dict(code="bundle_gmat_gre", kind="bundle", exam_code=None, name="GMAT + GRE Bundle",
-         currency="USD", amount_cents=29900, bundle_exams=["GMAT", "GRE"], limits=None),
-]
+# ---------------------------------------------------------------------------------------------------
+# Tier catalog. Access = a plan (WHAT you get, in `limits`) + a subscription (HOW LONG, expires_at),
+# per exam. `limits` knobs:
+#   content            : "all" | "sample"
+#   sample_chapters    : first N chapters/section unlocked (when content == "sample")
+#   sample_subtopics   : first M subtopics within those chapters (null => whole chapter)
+#   sectional_per_section / full_mocks : mock quotas (int; omit => unlimited) — total pool per subscription
+#   practice           : adaptive practice included (bool)
+#   diagnostic         : diagnostic test included (bool)
+#   days / months      : validity (trial uses days; paid uses months)
+# ensure_catalog() is AUTHORITATIVE: it upserts these limits every boot, so this code is the single
+# source of truth for who-gets-what. Prices are placeholders — tune freely.
+# ---------------------------------------------------------------------------------------------------
 
-# Fixed-term access passes shown on the checkout page. (code, exam, display name, paise, months).
-# Prices are paise (₹999 = 99900). Tune freely — they're seeded only if missing.
-_SUBSCRIPTION_PLANS = [
-    ("cat_1m",  "CAT",  "CAT — 1 Month",   99900, 1),
-    ("cat_3m",  "CAT",  "CAT — 3 Months",  249900, 3),
-    ("cat_6m",  "CAT",  "CAT — 6 Months",  399900, 6),
-    ("gmat_1m", "GMAT", "GMAT — 1 Month",  129900, 1),
-    ("gmat_3m", "GMAT", "GMAT — 3 Months", 299900, 3),
-    ("gmat_6m", "GMAT", "GMAT — 6 Months", 499900, 6),
-    ("gre_1m",  "GRE",  "GRE — 1 Month",   119900, 1),
-    ("gre_3m",  "GRE",  "GRE — 3 Months",  279900, 3),
-    ("gre_6m",  "GRE",  "GRE — 6 Months",  459900, 6),
-]
+# Free (registered, no purchase) — a permanent taste: sample content + 1 full mock, no practice.
+FREE_LIMITS = {"content": "sample", "sample_chapters": 1, "sample_subtopics": 2,
+               "sectional_per_section": 0, "full_mocks": 1, "practice": False, "diagnostic": True}
+# 7-day trial (one-time per exam): the free taste + a couple of mocks.
+TRIAL_LIMITS = {"days": 7, "content": "sample", "sample_chapters": 1, "sample_subtopics": 2,
+                "sectional_per_section": 2, "full_mocks": 1, "practice": False, "diagnostic": True}
 
-
-# 7-day free trial, one per account per exam. Quotas live in limits; content="sample" = the sample set.
+_FREE_PLANS = [("CAT", "INR"), ("GMAT", "USD"), ("GRE", "USD")]
 _TRIAL_PLANS = [("CAT", "INR"), ("GMAT", "USD"), ("GRE", "USD")]
-_TRIAL_LIMITS = {"days": 7, "sectional_per_section": 4, "full_mocks": 2, "content": "sample"}
-CONTENT_SAMPLE_CONCEPTS = 3   # first N concepts per section unlocked for trial/free learners
+
+# Legacy one-time paid SKUs + the multi-exam bundle. Not part of the new month-pass model, but kept
+# (create-only) so existing integrations/tests keep working. Frontend sells the month passes instead.
+_LEGACY_CATALOG = [
+    dict(code="gmat_summit", kind="paid", exam_code="GMAT", name="GMAT Summit",
+         currency="USD", amount_cents=19900, period="one_time", limits=None),
+    dict(code="gre_core", kind="paid", exam_code="GRE", name="GRE Core",
+         currency="USD", amount_cents=14900, period="one_time", limits=None),
+    dict(code="cat_pro", kind="paid", exam_code="CAT", name="CAT Pro",
+         currency="INR", amount_cents=1499900, period="one_time", limits=None),
+    dict(code="bundle_gmat_gre", kind="bundle", exam_code=None, name="GMAT + GRE Bundle",
+         currency="USD", amount_cents=29900, period="one_time", bundle_exams=["GMAT", "GRE"], limits=None),
+]
+
+# Paid month-passes: (code, exam, name, paise, months). Limits are COMPUTED from months by
+# _paid_limits() so every plan stays consistent.
+_SUBSCRIPTION_PLANS = [
+    ("cat_1m",  "CAT",  "CAT — 1 Month",     99900,  1),
+    ("cat_3m",  "CAT",  "CAT — 3 Months",   249900,  3),
+    ("cat_6m",  "CAT",  "CAT — 6 Months",   399900,  6),
+    ("cat_12m", "CAT",  "CAT — 12 Months",  599900, 12),
+    ("gmat_1m", "GMAT", "GMAT — 1 Month",   129900,  1),
+    ("gmat_3m", "GMAT", "GMAT — 3 Months",  299900,  3),
+    ("gmat_6m", "GMAT", "GMAT — 6 Months",  499900,  6),
+    ("gmat_12m","GMAT", "GMAT — 12 Months", 999900, 12),
+    ("gre_1m",  "GRE",  "GRE — 1 Month",    119900,  1),
+    ("gre_3m",  "GRE",  "GRE — 3 Months",   279900,  3),
+    ("gre_6m",  "GRE",  "GRE — 6 Months",   459900,  6),
+    ("gre_12m", "GRE",  "GRE — 12 Months",  899900, 12),
+]
+
+
+def _paid_limits(months: int) -> dict:
+    """A paid plan's `limits`, derived from its length:
+    12m -> everything + unlimited mocks; 1m -> limited learning (first 2 chapters/section) + 20/20;
+    3m/6m -> full learning + 20 sectional/section + 20 full PER MONTH (total pool = 20 x months)."""
+    base = {"months": months, "practice": True, "diagnostic": True}
+    if months >= 12:
+        return {**base, "content": "all"}                              # unlimited mocks (no caps)
+    if months == 1:
+        return {**base, "content": "sample", "sample_chapters": 2,
+                "sectional_per_section": 20, "full_mocks": 20}
+    return {**base, "content": "all",
+            "sectional_per_section": 20 * months, "full_mocks": 20 * months}
+
+
+def _upsert_plan(db: Session, *, code, kind, exam_code, name, currency, amount_cents, period,
+                 limits) -> bool:
+    """Create a managed plan, or keep its limits/active state authoritative if it already exists
+    (price/name are left as-is on an existing row)."""
+    p = db.get(models.PricePlan, code)
+    if p is None:
+        db.add(models.PricePlan(code=code, kind=kind, exam_code=exam_code, name=name, currency=currency,
+                                amount_cents=amount_cents, period=period, active=True, limits=limits))
+        return True
+    changed = False
+    if p.limits != limits:
+        p.limits = limits; changed = True
+    if not p.active:
+        p.active = True; changed = True
+    return changed
 
 
 def ensure_catalog(db: Session) -> None:
-    """Idempotently load the SKU catalog (safe to call on every boot)."""
+    """Load + keep the managed tier catalog authoritative (limits upserted every boot)."""
     changed = False
-    for spec in _CATALOG:
+    for spec in _LEGACY_CATALOG:                 # create-only (kept for compat)
         if db.get(models.PricePlan, spec["code"]) is None:
-            db.add(models.PricePlan(active=True, period="one_time", **spec))
-            changed = True
-    # Free-trial plans (kind="trial"): 7 days, 4 sectional mocks/section + 2 full mocks + sample content.
+            db.add(models.PricePlan(active=True, **spec)); changed = True
+    for exam, cur in _FREE_PLANS:
+        changed |= _upsert_plan(db, code=f"{exam.lower()}_free", kind="free", exam_code=exam,
+                                name=f"{exam} Free", currency=cur, amount_cents=0, period="one_time",
+                                limits=dict(FREE_LIMITS))
     for exam, cur in _TRIAL_PLANS:
-        code = f"{exam.lower()}_trial"
-        if db.get(models.PricePlan, code) is None:
-            db.add(models.PricePlan(code=code, kind="trial", exam_code=exam, name=f"{exam} 7-Day Trial",
-                                    currency=cur, amount_cents=0, period="one_time", active=True,
-                                    limits=dict(_TRIAL_LIMITS)))
-            changed = True
-    # Month-wise access passes (fixed-term). Duration lives in limits.months; all INR (India audience).
+        changed |= _upsert_plan(db, code=f"{exam.lower()}_trial", kind="trial", exam_code=exam,
+                                name=f"{exam} 7-Day Trial", currency=cur, amount_cents=0,
+                                period="one_time", limits=dict(TRIAL_LIMITS))
     for code, exam, name, paise, months in _SUBSCRIPTION_PLANS:
-        if db.get(models.PricePlan, code) is None:
-            db.add(models.PricePlan(code=code, kind="paid", exam_code=exam, name=name, currency="INR",
-                                    amount_cents=paise, period="subscription", active=True,
-                                    limits={"months": months}))
-            changed = True
+        changed |= _upsert_plan(db, code=code, kind="paid", exam_code=exam, name=name, currency="INR",
+                                amount_cents=paise, period="subscription", limits=_paid_limits(months))
     if changed:
         db.commit()
 
@@ -309,19 +351,48 @@ def has_used_trial(db: Session, account: models.Account, exam: str) -> bool:
         models.Subscription.plan_code == _trial_code(exam)).limit(1)) is not None
 
 
-def _count_full_attempts(db: Session, account: models.Account, exam: str) -> int:
-    return db.scalar(select(func.count(models.MockAttempt.id)).where(
+def _count_full_attempts(db: Session, account: models.Account, exam: str, since=None) -> int:
+    q = select(func.count(models.MockAttempt.id)).where(
         models.MockAttempt.learner_id == account.id,
         models.MockAttempt.exam_code == exam,
-        models.MockAttempt.mock_type == "full")) or 0
+        models.MockAttempt.mock_type == "full")
+    if since is not None:
+        q = q.where(models.MockAttempt.created_at >= since)
+    return db.scalar(q) or 0
 
 
-def _count_sectional_attempts(db: Session, account: models.Account, exam: str, section_key) -> int:
-    return db.scalar(select(func.count(models.MockAttempt.id)).where(
+def _count_sectional_attempts(db: Session, account: models.Account, exam: str, section_key, since=None) -> int:
+    q = select(func.count(models.MockAttempt.id)).where(
         models.MockAttempt.learner_id == account.id,
         models.MockAttempt.exam_code == exam,
         models.MockAttempt.mock_type == "sectional",
-        models.MockAttempt.section_key == section_key)) or 0
+        models.MockAttempt.section_key == section_key)
+    if since is not None:
+        q = q.where(models.MockAttempt.created_at >= since)
+    return db.scalar(q) or 0
+
+
+def _tier_plan(db: Session, account: models.Account, exam: str, state: dict):
+    """The PricePlan governing this learner's current access to `exam`: the paid subscription's plan,
+    the trial plan, or the free plan (or None)."""
+    tier = state["tier"]
+    if tier == "paid":
+        sub = active_subscription(db, account, exam)
+        return db.get(models.PricePlan, sub.plan_code) if sub else None
+    if tier == "trial":
+        return _trial_plan(db, exam)
+    if tier == "free":
+        return db.scalar(select(models.PricePlan).where(
+            models.PricePlan.exam_code == exam, models.PricePlan.kind == "free"))
+    return None
+
+
+def _tier_since(db: Session, account: models.Account, exam: str, state: dict):
+    """Mock quotas are scoped to the current subscription (trial/paid); free tier counts all-time."""
+    if state["tier"] in ("paid", "trial"):
+        sub = active_subscription(db, account, exam)
+        return sub.started_at if sub else None
+    return None
 
 
 def start_trial(db: Session, account: models.Account, exam: str) -> dict:
@@ -356,39 +427,31 @@ def start_trial(db: Session, account: models.Account, exam: str) -> dict:
 
 
 def trial_status(db: Session, account: models.Account, exam: str) -> dict:
-    """Trial state for the dashboard: days left + per-resource usage vs the trial quotas."""
+    """Access state for the dashboard: current tier, days left, and mock usage vs the tier's quotas."""
     exam = (exam or "").upper()
     st = entitlement_state(db, account, exam)
-    limits = ((_trial_plan(db, exam).limits if _trial_plan(db, exam) else {}) or {})
+    plan = _tier_plan(db, account, exam, st) or _trial_plan(db, exam)
+    limits = (plan.limits if plan else {}) or {}
     on_trial = st["tier"] == "trial"
-    sub = active_subscription(db, account, exam) if on_trial else None
+    sub = active_subscription(db, account, exam) if st["tier"] in ("trial", "paid") else None
+    since = sub.started_at if sub else None
     days_left, expires_at = None, None
     if sub is not None:
         expires_at = sub.expires_at.isoformat()
         secs = int((sub.expires_at - datetime.utcnow()).total_seconds())
         days_left = max(0, -(-secs // 86400))              # ceil to whole days
     sections = db.scalars(select(models.Section).where(models.Section.exam_code == exam)).all()
-    sectional_used = {s.key: _count_sectional_attempts(db, account, exam, s.key) for s in sections}
+    sectional_used = {s.key: _count_sectional_attempts(db, account, exam, s.key, since) for s in sections}
     return {
         "exam": exam, "tier": st["tier"], "status": st["status"],
         "on_trial": on_trial, "paid": st["paid"],
         "can_start_trial": (not st["paid"]) and (not st["trial"]) and not has_used_trial(db, account, exam),
         "days_left": days_left, "expires_at": expires_at,
         "limits": {"sectional_per_section": limits.get("sectional_per_section"),
-                   "full_mocks": limits.get("full_mocks"), "content": limits.get("content")},
-        "used": {"full_mocks": _count_full_attempts(db, account, exam), "sectional": sectional_used},
+                   "full_mocks": limits.get("full_mocks"), "content": limits.get("content"),
+                   "practice": limits.get("practice")},
+        "used": {"full_mocks": _count_full_attempts(db, account, exam, since), "sectional": sectional_used},
     }
-
-
-def _limit_for_tier(db: Session, exam: str, tier: str, resource: str):
-    if tier == "trial":
-        plan = _trial_plan(db, exam)
-    elif tier == "free":
-        plan = db.scalar(select(models.PricePlan).where(
-            models.PricePlan.exam_code == exam, models.PricePlan.kind == "free"))
-    else:
-        plan = None
-    return (plan.limits or {}).get(resource) if plan else None
 
 
 def _tier_or_lock(db: Session, account: models.Account, exam: str) -> dict:
@@ -404,57 +467,99 @@ def _tier_or_lock(db: Session, account: models.Account, exam: str) -> dict:
 
 
 def guard_mock_start(db: Session, account: models.Account, mock) -> None:
-    """Raise 402 if starting this mock exceeds the learner's tier limits. No-op unless enforcement is on.
-    paid: unlimited. trial: 4 sectional/section + 2 full. free: the free plan's full_mocks cap. expired: locked."""
+    """Raise 402 if starting this mock exceeds the learner's plan quota. No-op unless enforcement is on.
+    The quota comes from the active plan's limits (sectional_per_section / full_mocks); an omitted limit
+    means unlimited (e.g. 12-month). Counts are scoped to the current subscription. Expired -> locked."""
     if not settings.enforce_entitlements:
         return
     exam = (mock.exam_code or "").upper()
     st = _tier_or_lock(db, account, exam)
-    if st["paid"]:
-        return
+    plan = _tier_plan(db, account, exam, st)
+    limits = (plan.limits or {}) if plan else {}
     is_full = (mock.type or "").lower() == "full"
-    err = "trial_limit_reached" if st["trial"] else "free_tier_limit_reached"
+    limit = limits.get("full_mocks" if is_full else "sectional_per_section")
+    if limit is None:
+        return                                   # unlimited (or unset) for this plan
+    since = _tier_since(db, account, exam, st)
     if is_full:
-        limit = _limit_for_tier(db, exam, st["tier"], "full_mocks")
-        if limit is not None and _count_full_attempts(db, account, exam) >= limit:
-            raise HTTPException(402, {"error": err, "resource": "full_mocks", "exam": exam,
-                                      "limit": limit, "see": "/pricing"})
+        used, section = _count_full_attempts(db, account, exam, since), None
     else:
         from .student_mocks import _primary_section_key
-        sk = _primary_section_key(mock)
-        limit = _limit_for_tier(db, exam, st["tier"], "sectional_per_section")
-        if limit is not None and _count_sectional_attempts(db, account, exam, sk) >= limit:
-            raise HTTPException(402, {"error": err, "resource": "sectional_mocks", "section": sk,
-                                      "exam": exam, "limit": limit, "see": "/pricing"})
+        section = _primary_section_key(mock)
+        used = _count_sectional_attempts(db, account, exam, section, since)
+    if used >= limit:
+        err = ("trial_limit_reached" if st["trial"]
+               else "free_tier_limit_reached" if st["tier"] == "free" else "plan_limit_reached")
+        detail = {"error": err, "resource": ("full_mocks" if is_full else "sectional_mocks"),
+                  "exam": exam, "limit": limit, "used": used, "see": "/pricing"}
+        if section:
+            detail["section"] = section
+        raise HTTPException(402, detail)
 
 
-def _sample_concept_ids(db: Session, exam: str) -> set[str]:
-    """The trial/free 'sample' set: the first CONTENT_SAMPLE_CONCEPTS concept nodes (by creation order)
-    in each section. Deterministic default; admins can widen it later."""
+def _sample_concept_ids(db: Session, exam: str, sample_chapters: int = 1,
+                        sample_subtopics: int | None = None) -> set[str]:
+    """The 'sample' content set: the first `sample_chapters` chapters (topic nodes) of each section, and
+    within each the first `sample_subtopics` subtopics (concepts) — or all of them if that is None.
+    Chapter/subtopic order is creation order (deterministic default; admins can reorder content)."""
     ids: set[str] = set()
     for s in db.scalars(select(models.Section).where(models.Section.exam_code == exam)).all():
-        rows = db.scalars(select(models.KnowledgeNode.id).where(
+        topics = db.scalars(select(models.KnowledgeNode).where(
             models.KnowledgeNode.section_id == s.id,
-            models.KnowledgeNode.kind == models.NodeKind.concept.value,
-        ).order_by(models.KnowledgeNode.created_at.asc()).limit(CONTENT_SAMPLE_CONCEPTS)).all()
-        ids.update(rows)
+            models.KnowledgeNode.kind == models.NodeKind.topic.value,
+        ).order_by(models.KnowledgeNode.created_at.asc()).limit(max(0, sample_chapters))).all()
+        for t in topics:
+            q = select(models.KnowledgeNode.id).where(
+                models.KnowledgeNode.parent_id == t.id,
+                models.KnowledgeNode.kind == models.NodeKind.concept.value,
+            ).order_by(models.KnowledgeNode.created_at.asc())
+            if sample_subtopics is not None:
+                q = q.limit(sample_subtopics)
+            ids.update(db.scalars(q).all())
     return ids
 
 
 def guard_content(db: Session, account: models.Account, node) -> None:
-    """Raise 402 if a trial/free learner opens a concept outside the sample set. No-op unless enforcement
-    is on; paid learners get everything; topic/chapter nodes (navigation) always pass."""
+    """Raise 402 if the learner's plan gives only sample content and this concept is outside the sample.
+    No-op unless enforcement is on; plans with content=="all" pass; topic/chapter nodes always pass."""
     if not settings.enforce_entitlements:
         return
     if getattr(node, "kind", None) != models.NodeKind.concept.value:
         return
     exam = (node.exam_code or "").upper()
     st = _tier_or_lock(db, account, exam)
-    if st["paid"]:
-        return
-    if node.id not in _sample_concept_ids(db, exam):
+    plan = _tier_plan(db, account, exam, st)
+    limits = (plan.limits or {}) if plan else {}
+    if limits.get("content") != "sample":
+        return   # "all", unset, legacy paid, or a manual admin grant (no subscription) -> full content
+    allowed = _sample_concept_ids(db, exam, limits.get("sample_chapters", 1), limits.get("sample_subtopics"))
+    if node.id not in allowed:
         raise HTTPException(402, {"error": "content_locked", "exam": exam, "see": "/pricing",
-                                  "detail": "This chapter is available on a paid plan. Upgrade to unlock all content."})
+                                  "detail": "This is available on a higher plan. Upgrade to unlock all content."})
+
+
+def guard_practice(db: Session, account: models.Account, exam: str) -> None:
+    """Raise 402 if the learner's plan doesn't include adaptive practice. No-op unless enforcement is on."""
+    if not settings.enforce_entitlements:
+        return
+    exam = (exam or "").upper()
+    st = _tier_or_lock(db, account, exam)
+    plan = _tier_plan(db, account, exam, st)
+    if plan is not None and not (plan.limits or {}).get("practice", True):
+        raise HTTPException(402, {"error": "practice_locked", "exam": exam, "see": "/pricing",
+                                  "detail": "Adaptive practice is available on a paid plan. Upgrade to unlock it."})
+
+
+def guard_diagnostic(db: Session, account: models.Account, exam: str) -> None:
+    """Raise 402 if the learner's plan doesn't include the diagnostic. No-op unless enforcement is on."""
+    if not settings.enforce_entitlements:
+        return
+    exam = (exam or "").upper()
+    st = _tier_or_lock(db, account, exam)
+    plan = _tier_plan(db, account, exam, st)
+    if plan is not None and not (plan.limits or {}).get("diagnostic", True):
+        raise HTTPException(402, {"error": "diagnostic_locked", "exam": exam, "see": "/pricing",
+                                  "detail": "The diagnostic test isn't included on your current plan."})
 
 
 def validate_coupon(db, code: str, exam: str | None = None, amount: int = 0) -> dict:
