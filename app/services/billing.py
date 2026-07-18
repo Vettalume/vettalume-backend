@@ -34,12 +34,12 @@ from ..config import settings
 # source of truth for who-gets-what. Prices are placeholders — tune freely.
 # ---------------------------------------------------------------------------------------------------
 
-# Free (registered, no purchase) — a permanent taste: sample content + 1 full mock, no practice.
-FREE_LIMITS = {"content": "sample", "sample_chapters": 1, "sample_subtopics": 2,
-               "sectional_per_section": 0, "full_mocks": 1, "practice": False, "diagnostic": True}
-# 7-day trial (one-time per exam): the free taste + a couple of mocks.
-TRIAL_LIMITS = {"days": 7, "content": "sample", "sample_chapters": 1, "sample_subtopics": 2,
-                "sectional_per_section": 2, "full_mocks": 1, "practice": False, "diagnostic": True}
+# Free (registered, no purchase): the 1st chapter of each section, no mocks, no practice.
+FREE_LIMITS = {"content": "sample", "sample_chapters": 1,
+               "sectional_per_section": 0, "full_mocks": 0, "practice": False, "diagnostic": True}
+# 7-day trial (one-time per exam): 1st chapter of each section + a couple of mocks.
+TRIAL_LIMITS = {"days": 7, "content": "sample", "sample_chapters": 1,
+                "sectional_per_section": 2, "full_mocks": 2, "practice": False, "diagnostic": True}
 
 _FREE_PLANS = [("CAT", "INR"), ("GMAT", "USD"), ("GRE", "USD")]
 _TRIAL_PLANS = [("CAT", "INR"), ("GMAT", "USD"), ("GRE", "USD")]
@@ -83,7 +83,7 @@ def _paid_limits(months: int) -> dict:
     if months >= 12:
         return {**base, "content": "all"}                              # unlimited mocks (no caps)
     if months == 1:
-        return {**base, "content": "sample", "sample_chapters": 2,
+        return {**base, "content": "sample", "sample_chapters": 1,   # 1st chapter of each section
                 "sectional_per_section": 20, "full_mocks": 20}
     return {**base, "content": "all",
             "sectional_per_section": 20 * months, "full_mocks": 20 * months}
@@ -536,6 +536,26 @@ def guard_content(db: Session, account: models.Account, node) -> None:
     if node.id not in allowed:
         raise HTTPException(402, {"error": "content_locked", "exam": exam, "see": "/pricing",
                                   "detail": "This is available on a higher plan. Upgrade to unlock all content."})
+
+
+def content_access(db: Session, account: models.Account, exam: str) -> dict:
+    """What content the learner can open, for the overview's lock icons: {'all': True} for full access,
+    else {'all': False, 'concepts': <set of unlocked concept ids>}. Respects enforcement (all when off)."""
+    exam = (exam or "").upper()
+    if not settings.enforce_entitlements:
+        return {"all": True}
+    st = entitlement_state(db, account, exam)
+    if st["status"] == "expired":
+        return {"all": False, "concepts": set()}           # trial/plan lapsed -> everything locked
+    if st["status"] is None:
+        st = grant_free_tier(db, account, exam)
+    plan = _tier_plan(db, account, exam, st)
+    limits = (plan.limits or {}) if plan else {}
+    if limits.get("content") != "sample":
+        return {"all": True}                                # paid "all", legacy, or manual admin grant
+    return {"all": False,
+            "concepts": _sample_concept_ids(db, exam, limits.get("sample_chapters", 1),
+                                            limits.get("sample_subtopics"))}
 
 
 def guard_practice(db: Session, account: models.Account, exam: str) -> None:

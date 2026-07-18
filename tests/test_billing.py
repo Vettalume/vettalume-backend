@@ -80,7 +80,7 @@ def test_free_tier_usage_counts_full_mocks():
                               plan={}, seed=1))
     db.commit()
     usage = billing.free_tier_usage(db, a, "CAT")
-    assert usage["used"] == 1 and usage["limit"] == 1 and usage["exhausted"] is True
+    assert usage["used"] == 1 and usage["limit"] == 0 and usage["exhausted"] is True
 
 
 def test_enforcement_is_off_by_default_and_gates_when_on(monkeypatch):

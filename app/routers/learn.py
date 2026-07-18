@@ -179,6 +179,12 @@ def learn_overview(exam: str, learner=Depends(get_current_learner), db: Session 
     def mastery_pct(cid: str) -> int:
         return round(100 * (states[cid].mastery if cid in states else 0.0))
 
+    # Per-plan content locks (for the lock icons): which chapters/subtopics this learner can open.
+    access = billing.content_access(db, learner, exam)
+
+    def is_locked(cid: str) -> bool:
+        return not access["all"] and cid not in access["concepts"]
+
     out_sections = []
     for s in static["sections"]:
         chapters = []
@@ -186,7 +192,8 @@ def learn_overview(exam: str, learner=Depends(get_current_learner), db: Session 
         all_masteries: list[int] = []        # chapter topic-mastery, every chapter (Concept Mastery)
         for ch in s["chapters"]:
             concept_ids = [c["id"] for c in ch["concepts"]]
-            subs = [{"id": c["id"], "name": c["name"], "pct": concept_pct(c["id"])} for c in ch["concepts"]]
+            subs = [{"id": c["id"], "name": c["name"], "pct": concept_pct(c["id"]),
+                     "locked": is_locked(c["id"])} for c in ch["concepts"]]
             ch_progress = avg_pct([x["pct"] for x in subs])   # notes + video + correct/total
             # chapter topic-mastery = avg of its subtopics' blended mastery (0.40P+0.30D+0.30M),
             # persisted per node, out of 100
@@ -199,6 +206,8 @@ def learn_overview(exam: str, learner=Depends(get_current_learner), db: Session 
                 "pct": ch_progress,
                 "mastery": ch_mastery,
                 "difficulty": chapter_difficulty(concept_ids),
+                # a chapter is locked when none of its subtopics are unlocked on this plan
+                "locked": not access["all"] and not any(cid in access["concepts"] for cid in concept_ids),
                 "subtopics": subs,
             })
 
