@@ -918,7 +918,7 @@ def list_coupons(db: Session = Depends(get_db)) -> dict:
 
 @router.post("/coupons")
 def create_coupon(body: CouponIn, db: Session = Depends(get_db)) -> dict:
-    code = (body.code or "").strip().upper()
+    code = "".join((body.code or "").split()).upper()   # strip ALL whitespace (no spaces in codes)
     if not code:
         raise HTTPException(400, "coupon code is required")
     if body.type not in ("percentage", "fixed"):
@@ -942,7 +942,7 @@ def update_coupon(cid: str, body: CouponIn, db: Session = Depends(get_db)) -> di
     c = db.get(models.Coupon, cid)
     if c is None:
         raise HTTPException(404, "no such coupon")
-    code = (body.code or "").strip().upper()
+    code = "".join((body.code or "").split()).upper()   # strip ALL whitespace (no spaces in codes)
     if not code:
         raise HTTPException(400, "coupon code is required")
     if code != c.code and db.scalar(select(models.Coupon).where(func.upper(models.Coupon.code) == code)):

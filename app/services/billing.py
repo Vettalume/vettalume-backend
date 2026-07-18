@@ -570,10 +570,13 @@ def validate_coupon(db, code: str, exam: str | None = None, amount: int = 0) -> 
     from sqlalchemy import func, select
 
     from .. import models
-    code = (code or "").strip().upper()
+    def _norm(s):
+        return "".join((s or "").split()).upper()   # ignore all whitespace + case
+    code = _norm(code)
     if not code:
         return {"valid": False, "reason": "Enter a coupon code"}
-    c = db.scalar(select(models.Coupon).where(func.upper(models.Coupon.code) == code))
+    # Small table — match on the whitespace/case-insensitive code so "TEST 90" == "test90".
+    c = next((x for x in db.scalars(select(models.Coupon)).all() if _norm(x.code) == code), None)
     if c is None:
         return {"valid": False, "reason": "Invalid coupon code"}
     if c.status != "active":
