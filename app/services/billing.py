@@ -565,7 +565,7 @@ def guard_diagnostic(db: Session, account: models.Account, exam: str) -> None:
 def validate_coupon(db, code: str, exam: str | None = None, amount: int = 0) -> dict:
     """Preview a coupon's discount for an order (amount in paise). Read-only — does not consume a use.
     Returns {valid, discount, final, reason}. This is the backend for 'apply coupon at checkout'."""
-    from datetime import datetime
+    from datetime import datetime, timedelta
 
     from sqlalchemy import func, select
 
@@ -588,7 +588,9 @@ def validate_coupon(db, code: str, exam: str | None = None, amount: int = 0) -> 
         except (ValueError, TypeError):
             return None
 
-    now = datetime.now()
+    # Admin valid-from/until are naive datetime-local wall-clock in IST (India product), so compare
+    # against "now" in IST — not the server's UTC — or a just-created coupon reads as "not yet valid".
+    now = datetime.utcnow() + timedelta(hours=5, minutes=30)
     vf, vu = _parse(c.valid_from), _parse(c.valid_until)
     if vf and now < vf:
         return {"valid": False, "reason": "This coupon is not yet valid"}
