@@ -380,6 +380,7 @@ class PaymentOrder(Base):
     status: Mapped[str] = mapped_column(String(16), default="created")  # created | paid | failed
     rp_payment_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     granted: Mapped[bool] = mapped_column(Boolean, default=False)        # access granted? (idempotency guard)
+    coupon_code: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)  # applied coupon (usage counted on grant)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

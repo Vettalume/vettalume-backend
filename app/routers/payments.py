@@ -19,7 +19,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import models
@@ -51,26 +51,55 @@ def list_plans(exam: str | None = None, db: Session = Depends(get_db)) -> dict:
 
 class OrderIn(BaseModel):
     plan_code: str
+    coupon: str | None = None
 
 
 @router.post("/order")
 def create_order(body: OrderIn, learner=Depends(get_current_learner),
                  db: Session = Depends(get_db)) -> dict:
-    """Create a Razorpay order for a plan; the browser opens Checkout with the returned order_id."""
+    """Create a Razorpay order for a plan (optionally applying a coupon); the browser opens Checkout
+    with the returned order_id. A coupon that zeroes the price grants the plan directly (no charge)."""
     plan = db.get(models.PricePlan, body.plan_code)
     if plan is None or not plan.active or plan.period != "subscription":
         raise HTTPException(404, f"unknown plan '{body.plan_code}'")
+
+    amount = plan.amount_cents
+    coupon_code = None
+    coupon_out = None
+    if body.coupon:
+        res = billing.validate_coupon(db, body.coupon, exam=plan.exam_code, amount=plan.amount_cents)
+        if not res.get("valid"):
+            raise HTTPException(400, {"error": "coupon_invalid", "detail": res.get("reason")})
+        amount = int(res["final"])
+        coupon_code = res["code"]
+        coupon_out = {"code": res["code"], "discount": res["discount"]}
+
+    # 100%-off (or more) coupon -> nothing to charge; grant the plan straight away and count the coupon.
+    if amount <= 0:
+        grant = billing.grant_subscription(db, learner, plan)
+        if coupon_code:
+            _consume_coupon(db, coupon_code)
+        return {"free": True, "plan": _plan_out(plan), "coupon": coupon_out, **grant}
+
     rp = payments.create_order(
-        plan.amount_cents, currency=plan.currency or "INR",
+        amount, currency=plan.currency or "INR",
         receipt=f"vl_{plan.code}_{uuid.uuid4().hex[:10]}"[:40],   # Razorpay caps receipt at 40 chars
         notes={"account_id": str(learner.id), "plan_code": plan.code})  # the real linkage lives in notes
     db.add(models.PaymentOrder(id=rp["id"], account_id=learner.id, plan_code=plan.code,
-                               amount_paise=plan.amount_cents, currency=plan.currency or "INR",
-                               status="created"))
+                               amount_paise=amount, currency=plan.currency or "INR",
+                               status="created", coupon_code=coupon_code))
     db.commit()
-    return {"order_id": rp["id"], "amount": plan.amount_cents, "currency": plan.currency or "INR",
-            "key_id": settings.razorpay_key_id, "plan": _plan_out(plan),
+    return {"order_id": rp["id"], "amount": amount, "currency": plan.currency or "INR",
+            "key_id": settings.razorpay_key_id, "plan": _plan_out(plan), "coupon": coupon_out,
             "name": learner.display_name, "email": learner.email}
+
+
+def _consume_coupon(db: Session, code: str) -> None:
+    """Increment a coupon's usage counter once a plan is actually granted."""
+    c = db.scalar(select(models.Coupon).where(func.upper(models.Coupon.code) == (code or "").upper()))
+    if c is not None:
+        c.used = (c.used or 0) + 1
+        db.commit()
 
 
 class VerifyIn(BaseModel):
@@ -123,6 +152,8 @@ def _grant_for_order(db: Session, po: "models.PaymentOrder", payment_id: str | N
         raise HTTPException(404, "order references a missing plan/account")
     po.status, po.rp_payment_id, po.granted = "paid", payment_id, True
     db.commit()
+    if po.coupon_code:                       # count the coupon once, on the (idempotent) grant
+        _consume_coupon(db, po.coupon_code)
     grant = billing.grant_subscription(db, account, plan, order_id=po.id, rp_payment_id=payment_id)
     # Best-effort receipt — a mail outage must not undo a captured payment (see email._best_effort).
     email_svc.send_payment_confirmation(
