@@ -123,7 +123,15 @@ app.include_router(payments.router)
 
 @app.get("/health", tags=["meta"])
 def health() -> dict:
-    return {"status": "ok", "phase": 1}
+    """Liveness + which integrations are wired on the server (booleans only, no secrets)."""
+    return {
+        "status": "ok", "phase": 1,
+        "email_configured": bool(settings.resend_api_key or settings.smtp_host),
+        "email_provider": "resend" if settings.resend_api_key else ("smtp" if settings.smtp_host else None),
+        "razorpay_configured": bool(settings.razorpay_key_id and settings.razorpay_key_secret),
+        "razorpay_webhook_configured": bool(settings.razorpay_webhook_secret),
+        "enforce_entitlements": settings.enforce_entitlements,
+    }
 
 
 @app.get("/admin", include_in_schema=False)

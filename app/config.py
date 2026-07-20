@@ -75,6 +75,9 @@ class Settings(BaseSettings):
 
     public_name: str = "Vettalume"
     terms_url: str = "https://vettalume.com/terms"
+    # Public site URL used for CTA buttons in emails. Set APP_URL to https://vettalume.com once the
+    # domain points at the app; defaults to the current Vercel URL.
+    app_url: str = "https://vettalume-frontend-tawny.vercel.app"
 
     # --- connection pool (used for Postgres/any server DB; ignored for SQLite) ---
     # Total DB connections at peak ~= (web workers) x (db_pool_size + db_max_overflow). Keep that
