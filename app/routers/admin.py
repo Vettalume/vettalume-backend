@@ -19,7 +19,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from .. import models
@@ -243,21 +243,51 @@ def delete_node(node_id: str, cascade: bool = False, db: Session = Depends(get_d
 
 
 class NodeRenameIn(BaseModel):
-    name: str
+    name: str | None = None
+    section_key: str | None = None   # move the node (and, for a chapter, its subtopics + questions)
+
+
+def _descendant_ids(db: Session, node_id: str) -> set[str]:
+    """A node plus everything under it via parent_id (a chapter's subtopics + their practice banks)."""
+    ids = {node_id}
+    frontier = [node_id]
+    while frontier:
+        kids = db.scalars(select(models.KnowledgeNode.id).where(
+            models.KnowledgeNode.parent_id.in_(frontier))).all()
+        new = [k for k in kids if k not in ids]
+        ids.update(new)
+        frontier = new
+    return ids
 
 
 @router.patch("/nodes/{node_id}")
 def rename_node(node_id: str, body: NodeRenameIn, db: Session = Depends(get_db)) -> dict:
-    """Rename a chapter (topic) or subtopic (concept). Content, children and items are untouched."""
+    """Rename a chapter/subtopic and/or move it to another section. Moving a chapter cascades the new
+    section to all its subtopics and their questions so the whole branch stays consistent."""
     n = db.get(models.KnowledgeNode, node_id)
     if n is None:
         raise HTTPException(404, f"no node {node_id!r}")
     name = (body.name or "").strip()
-    if not name:
-        raise HTTPException(400, "name cannot be empty")
-    n.name = name
+    if name:
+        n.name = name
+    moved_to = None
+    if body.section_key:
+        sid = _section_id(db, n.exam_code, body.section_key)
+        if sid is None:
+            raise HTTPException(404, f"no section {body.section_key!r} for {n.exam_code}")
+        ids = _descendant_ids(db, node_id)
+        db.execute(update(models.KnowledgeNode).where(models.KnowledgeNode.id.in_(ids)).values(section_id=sid))
+        db.execute(update(models.Item).where(models.Item.concept_node_id.in_(ids)).values(section_id=sid))
+        moved_to = body.section_key
+    if not name and moved_to is None:
+        raise HTTPException(400, "nothing to update — send name and/or section_key")
     db.commit()
-    return {"id": n.id, "name": n.name, "kind": n.kind}
+    try:                                   # content shape changed -> drop the cached overview
+        from .learn import invalidate_overview_cache
+        invalidate_overview_cache()
+    except Exception:
+        pass
+    return {"id": n.id, "name": n.name, "kind": n.kind, "section": moved_to}
 
 
 @router.post("/nodes/{node_id}/practice-bank")
