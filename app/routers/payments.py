@@ -46,7 +46,9 @@ def list_plans(exam: str | None = None, db: Session = Depends(get_db)) -> dict:
     plans = sorted(db.scalars(q).all(), key=lambda p: (p.exam_code or "", p.amount_cents))
     return {"plans": [_plan_out(p) for p in plans],
             "razorpay_key_id": settings.razorpay_key_id or None,
-            "configured": payments.is_configured()}
+            "configured": payments.is_configured(),
+            # True once RAZORPAY_WEBHOOK_SECRET is set on the server (the value is never exposed).
+            "webhook_configured": bool(settings.razorpay_webhook_secret)}
 
 
 class OrderIn(BaseModel):
