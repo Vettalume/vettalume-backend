@@ -106,6 +106,7 @@ class KnowledgeNode(Base):
     parent_id: Mapped[Optional[str]] = mapped_column(ForeignKey("knowledge_nodes.id"), nullable=True)
     theory: Mapped[Optional[dict]] = mapped_column(JSONType, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)   # admin display order (lower = earlier)
 
 
 class PrereqEdge(Base):

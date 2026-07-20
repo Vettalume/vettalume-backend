@@ -24,7 +24,8 @@ def _ensure_optional_columns(engine) -> None:
     is_pg = settings.database_url.startswith("postgres")
     # (table, column, type)
     additive = [("auth_sessions", "ua_hash", "VARCHAR(64)"),
-                ("payment_orders", "coupon_code", "VARCHAR(40)")]
+                ("payment_orders", "coupon_code", "VARCHAR(40)"),
+                ("knowledge_nodes", "sort_order", "INTEGER DEFAULT 0")]
     for table, col, coltype in additive:
         stmt = (f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {coltype}" if is_pg
                 else f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")

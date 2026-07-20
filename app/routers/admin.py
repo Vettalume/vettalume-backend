@@ -64,7 +64,8 @@ def syllabus(exam: str, db: Session = Depends(get_db)) -> dict:
     if ex is None:
         raise HTTPException(404, f"no exam {exam!r}")
     sections = db.scalars(select(models.Section).where(models.Section.exam_code == exam)).all()
-    nodes = db.scalars(select(models.KnowledgeNode).where(models.KnowledgeNode.exam_code == exam)).all()
+    nodes = db.scalars(select(models.KnowledgeNode).where(models.KnowledgeNode.exam_code == exam)
+                       .order_by(models.KnowledgeNode.sort_order, models.KnowledgeNode.created_at)).all()
     prereqs = db.scalars(select(models.PrereqEdge)).all()
     items = db.scalars(select(models.Item).where(models.Item.exam_code == exam)).all()
     sec_by_id = {s.id: s for s in sections}
@@ -288,6 +289,25 @@ def rename_node(node_id: str, body: NodeRenameIn, db: Session = Depends(get_db))
     except Exception:
         pass
     return {"id": n.id, "name": n.name, "kind": n.kind, "section": moved_to}
+
+
+class ReorderIn(BaseModel):
+    ids: list[str]
+
+
+@router.post("/nodes/reorder")
+def reorder_nodes(body: ReorderIn, db: Session = Depends(get_db)) -> dict:
+    """Persist a display order: sets sort_order = position in the given id list (used for chapter/
+    subtopic up-down ordering). Order flows into the student view + the trial's '1st chapter'."""
+    for i, nid in enumerate(body.ids or []):
+        db.execute(update(models.KnowledgeNode).where(models.KnowledgeNode.id == nid).values(sort_order=i))
+    db.commit()
+    try:
+        from .learn import invalidate_overview_cache
+        invalidate_overview_cache()
+    except Exception:
+        pass
+    return {"ok": True, "count": len(body.ids or [])}
 
 
 @router.post("/nodes/{node_id}/practice-bank")

@@ -507,12 +507,12 @@ def _sample_concept_ids(db: Session, exam: str, sample_chapters: int = 1,
         topics = db.scalars(select(models.KnowledgeNode).where(
             models.KnowledgeNode.section_id == s.id,
             models.KnowledgeNode.kind == models.NodeKind.topic.value,
-        ).order_by(models.KnowledgeNode.created_at.asc()).limit(max(0, sample_chapters))).all()
+        ).order_by(models.KnowledgeNode.sort_order, models.KnowledgeNode.created_at).limit(max(0, sample_chapters))).all()
         for t in topics:
             q = select(models.KnowledgeNode.id).where(
                 models.KnowledgeNode.parent_id == t.id,
                 models.KnowledgeNode.kind == models.NodeKind.concept.value,
-            ).order_by(models.KnowledgeNode.created_at.asc())
+            ).order_by(models.KnowledgeNode.sort_order, models.KnowledgeNode.created_at)
             if sample_subtopics is not None:
                 q = q.limit(sample_subtopics)
             ids.update(db.scalars(q).all())

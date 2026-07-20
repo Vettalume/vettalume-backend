@@ -49,7 +49,8 @@ def _build_overview_static(db: Session, exam: str) -> dict | None:
         return None
 
     sections = db.scalars(select(models.Section).where(models.Section.exam_code == exam)).all()
-    nodes = db.scalars(select(models.KnowledgeNode).where(models.KnowledgeNode.exam_code == exam)).all()
+    nodes = db.scalars(select(models.KnowledgeNode).where(models.KnowledgeNode.exam_code == exam)
+                       .order_by(models.KnowledgeNode.sort_order, models.KnowledgeNode.created_at)).all()
     item_rows = db.execute(
         select(models.Item.item_id, models.Item.concept_node_id, models.Item.difficulty_d)
         .where(models.Item.exam_code == exam)
