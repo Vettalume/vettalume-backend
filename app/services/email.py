@@ -74,34 +74,34 @@ def _send_smtp(to: str, subject: str, body: str) -> dict:
     return {"sent": True, "dev": False, "provider": "smtp"}
 
 
-def send_email(to: str, subject: str, body: str, html: str | None = None) -> dict:
-    """Send one email via the best configured transport. Raises HTTPException(502) if a configured
-    provider fails (so OTP delivery failures surface); prints to console when nothing is configured."""
-    # In development we never call an external provider — this dodges provider limits (e.g. Resend's
-    # sandbox only mails your own verified address), so signup/OTP is fully self-serve with no mail
-    # configured. The OTP itself is surfaced to the client by the auth layer. Production always sends
-    # for real (production_problems() forces DEV_MODE off before a live deploy can boot).
-    if settings.dev_mode:
-        print(
-            f"\n──────── EMAIL (dev mode — NOT actually sent) ────────\n"
-            f"To:      {to}\nSubject: {subject}\n\n{body}\n"
-            f"──────────────────────────────────────────────────────\n",
-            flush=True,
-        )
-        return {"sent": False, "dev": True}
-    if settings.resend_api_key:
-        return _send_resend(to, subject, body, html)
-    if settings.smtp_host:
-        return _send_smtp(to, subject, body)
-    # DEV fallback — DO NOT use in production. Lets you read the OTP from the uvicorn console.
+def _console(to: str, subject: str, body: str) -> dict:
     print(
-        f"\n──────── EMAIL (dev mode — NOT actually sent) ────────\n"
+        f"\n──────── EMAIL (not sent — no provider / dev fallback) ────────\n"
         f"To:      {to}\nSubject: {subject}\n\n{body}\n"
-        f"──────────────────────────────────────────────────────\n",
+        f"──────────────────────────────────────────────────────────────\n",
         flush=True,
     )
-    log.warning("dev-email to %s: %s", to, subject)
     return {"sent": False, "dev": True}
+
+
+def send_email(to: str, subject: str, body: str, html: str | None = None) -> dict:
+    """Send one email via the configured transport (Resend > SMTP), independent of DEV_MODE — real
+    email works as soon as a provider is wired, without flipping the whole app out of dev mode. When
+    NO provider is configured it prints to the console (so local dev stays self-serve — just don't set
+    RESEND_API_KEY/SMTP_HOST locally). In dev mode a provider FAILURE (e.g. the Resend domain isn't
+    verified yet) is tolerated and falls back to console so signup/OTP keeps working; production
+    re-raises so a broken mail setup surfaces."""
+    if not (settings.resend_api_key or settings.smtp_host):
+        return _console(to, subject, body)
+    try:
+        if settings.resend_api_key:
+            return _send_resend(to, subject, body, html)
+        return _send_smtp(to, subject, body)
+    except Exception:
+        if not settings.dev_mode:
+            raise                       # production: surface the failure (OTP delivery must be reliable)
+        log.warning("email to %s failed in dev mode — falling back to console", to)
+        return _console(to, subject, body)
 
 
 def _best_effort(fn, *args, **kwargs) -> dict:
