@@ -13,8 +13,15 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import models
-from . import engine, knowledge_graph as kg
+from . import engine, knowledge_graph as kg, media
 from .state import eligible_items, record_response
+
+
+def _image_cands(it: "models.Item") -> list:
+    """Ids an uploaded question image may be named by: the generated item id OR the author's
+    Excel 'Question ID' (stored as provenance.external_id). Mirrors the learning-quiz serializer."""
+    ext = (it.provenance or {}).get("external_id") if it.provenance else None
+    return [it.item_id, ext]
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)  # sort sentinel for never-seen items
 
@@ -82,6 +89,7 @@ def practice_batch(db: Session, learner: models.Account, topic: models.Knowledge
     scored.sort(key=lambda t: (t[0], t[1], t[2]))
     batch = [it for _, _, _, it in scored[:max(1, min(limit, 2000))]]
 
+    img_keys = media.existing_keys(db, [c for it in batch for c in _image_cands(it)])
     return {
         "exam": topic.exam_code,
         "chapter": {"id": topic.id, "name": topic.name, "section": kg._section_key_of(db, topic)},
@@ -89,6 +97,7 @@ def practice_batch(db: Session, learner: models.Account, topic: models.Knowledge
             "item_id": it.item_id, "stem": it.stem, "options": it.options or [],
             "format": it.format, "num_options": it.num_options,
             "difficulty": it.difficulty_d, "concept_id": it.concept_node_id,
+            "image": media.resolve("", _image_cands(it), img_keys),
         } for it in batch],
     }
 
@@ -175,7 +184,9 @@ def practice_next(db: Session, learner: models.Account, topic: models.KnowledgeN
                          "mastery_threshold": round(engine.H, 4)},
             "question": {"item_id": item.item_id, "stem": item.stem, "options": item.options or [],
                          "format": item.format, "num_options": item.num_options,
-                         "difficulty": item.difficulty_d},
+                         "difficulty": item.difficulty_d,
+                         "image": media.resolve("", _image_cands(item),
+                                                media.existing_keys(db, _image_cands(item)))},
         }
     return {"status": "done", "subtopics_total": total, "subtopics_mastered": mastered,
             "chapter": {"id": topic.id, "name": topic.name},
