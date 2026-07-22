@@ -272,23 +272,66 @@ def topic_fully_mastered(db: Session, learner_id: uuid.UUID, topic: models.Knowl
     return all(concept_state(db, learner_id, c, now).mastered for c in concepts)
 
 
+def _topics_locked_batch(db: Session, learner_id: uuid.UUID, topics,
+                         now: datetime | None = None) -> dict[str, bool]:
+    """Batched is_topic_locked: resolve every topic's prereq edges and each prereq's mastery at once
+    (is_topic_locked measures each prereq via topic_mastery, regardless of the prereq's kind)."""
+    ids = [t.id for t in topics]
+    if not settings.zpd_use_prereqs or not ids:
+        return {}
+    edges = db.execute(
+        select(models.PrereqEdge.node_id, models.PrereqEdge.prereq_node_id)
+        .where(models.PrereqEdge.node_id.in_(ids))).all()
+    if not edges:
+        return {}
+    prereqs_by_topic: dict[str, list[str]] = defaultdict(list)
+    prereq_ids: set[str] = set()
+    for node_id, prereq_id in edges:
+        prereqs_by_topic[node_id].append(prereq_id)
+        prereq_ids.add(prereq_id)
+    prereq_nodes = {n.id: n for n in db.scalars(
+        select(models.KnowledgeNode).where(models.KnowledgeNode.id.in_(prereq_ids))).all()}
+    tmastery = {pid: topic_mastery(db, learner_id, prereq_nodes[pid], now)
+                for pid in prereq_ids if pid in prereq_nodes}
+    return {tid: any(tmastery.get(pid, 0.0) < engine.H
+                     for pid in prereqs_by_topic.get(tid, []) if pid in prereq_nodes)
+            for tid in ids}
+
+
 def recommend_topics_ranked(db: Session, learner_id: uuid.UUID, exam: str,
                             section_key: str | None = None, now: datetime | None = None):
     """Topic bandit, full ranking: UNLOCKED topics that still have something to teach or climb, with
     servable items, ordered by expected learning gain (best first). A topic stays in play until its
     concepts are *mastered* (worked up the difficulty ladder), not merely above H."""
     now = now or engine.now_utc()
+    topics = topics_of(db, exam, section_key)
+    if not topics:
+        return []
+    # Batch everything the per-topic scoring needs — was an N+1 across topics x concepts (each topic
+    # re-ran topic_fully_mastered / topic_mastery / a "started?" check, all per-concept).
+    all_concepts = db.scalars(
+        select(models.KnowledgeNode).where(
+            models.KnowledgeNode.parent_id.in_([t.id for t in topics]),
+            models.KnowledgeNode.kind == models.NodeKind.concept.value)).all()
+    by_topic: dict[str, list] = defaultdict(list)
+    for c in all_concepts:
+        by_topic[c.parent_id].append(c)
+    cstates = concept_states_batch(db, learner_id, all_concepts, now)
+    have_items = concepts_with_items(db, [c.id for c in all_concepts])
+    locked = _topics_locked_batch(db, learner_id, topics, now)
+
     scored = []
-    for topic in topics_of(db, exam, section_key):
-        if is_topic_locked(db, learner_id, topic, now):
+    for topic in topics:
+        if locked.get(topic.id):
             continue
-        if not _topic_has_items(db, topic.id):
+        tconcepts = by_topic.get(topic.id, [])
+        if not any(c.id in have_items for c in tconcepts):          # _topic_has_items
             continue
-        if topic_fully_mastered(db, learner_id, topic, now):
+        servable = [c for c in tconcepts if c.id in have_items and not is_practice_bank(c)]
+        if all(cstates[c.id].mastered for c in servable):           # topic_fully_mastered (True if none)
             continue
-        m = topic_mastery(db, learner_id, topic, now)
-        started = any(concept_state(db, learner_id, c, now).learned
-                      for c in _concepts_of_topic(db, topic.id))
+        m = (sum(cstates[c.id].mastery for c in tconcepts) / len(tconcepts)) if tconcepts else 0.0
+        started = any(cstates[c.id].learned for c in tconcepts)
         scored.append((engine.expected_gain(m, started), topic))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [t for _, t in scored]
