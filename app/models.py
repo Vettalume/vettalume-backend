@@ -16,6 +16,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     String,
@@ -98,6 +99,12 @@ class Section(Base):
 # ---- knowledge graph: tree (parent_id) + DAG (PrereqEdge) ----
 class KnowledgeNode(Base):
     __tablename__ = "knowledge_nodes"
+    # FK columns aren't auto-indexed in Postgres; the syllabus tree is walked by exam and by
+    # parent_id (children lookup) on every /learn/overview and /admin/syllabus build.
+    __table_args__ = (
+        Index("ix_knodes_exam", "exam_code"),
+        Index("ix_knodes_parent", "parent_id"),
+    )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)  # authored, e.g. 'avg-simple'
     exam_code: Mapped[str] = mapped_column(ForeignKey("exams.code"))
     section_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sections.id"))
@@ -125,6 +132,13 @@ class Item(Base):
     responses bind to; that machinery is added in Phase 2, when calibration makes version
     binding load-bearing. The response already snapshots item_version, so the seam exists."""
     __tablename__ = "items"
+    # The single hottest filter in the app: `WHERE concept_node_id = ? [AND status='approved']`
+    # runs on practice / quiz / mastery / item-count paths. Without these, Postgres seq-scans the
+    # whole items table each time (compounded across the N+1 loops). exam_code serves the overview scan.
+    __table_args__ = (
+        Index("ix_items_concept_status", "concept_node_id", "status"),
+        Index("ix_items_exam", "exam_code"),
+    )
     item_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
     content_hash: Mapped[str] = mapped_column(String(64))
@@ -390,6 +404,8 @@ class Subscription(Base):
     Entitlement table can't gain columns), and the access guard treats a paid entitlement as expired
     once its subscription lapses. Renewals extend expires_at."""
     __tablename__ = "subscriptions"
+    # Access guards look up "this account's subscription for this exam" on paid endpoints.
+    __table_args__ = (Index("ix_subs_acct_exam", "account_id", "exam_code"),)
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
     exam_code: Mapped[str] = mapped_column(ForeignKey("exams.code"))
