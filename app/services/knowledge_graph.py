@@ -7,6 +7,7 @@ avoids state-sync bugs.
 from __future__ import annotations
 
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -339,6 +340,44 @@ def is_concept_locked(db: Session, learner_id: uuid.UUID, concept: models.Knowle
     return False
 
 
+def _concepts_locked_batch(db: Session, learner_id: uuid.UUID, concepts,
+                           now: datetime | None = None) -> dict[str, bool]:
+    """Batched is_concept_locked for many concepts: resolve all prerequisite edges and the mastery
+    of every referenced prereq in a handful of queries, instead of per-concept (which was an N+1
+    that also recursed into concept_state / topic_mastery). Returns {concept_id -> locked?}."""
+    ids = [c.id for c in concepts]
+    if not settings.zpd_use_prereqs or not ids:
+        return {}
+    edges = db.execute(
+        select(models.PrereqEdge.node_id, models.PrereqEdge.prereq_node_id)
+        .where(models.PrereqEdge.node_id.in_(ids))).all()
+    if not edges:
+        return {}
+    prereqs_by_concept: dict[str, list[str]] = defaultdict(list)
+    prereq_ids: set[str] = set()
+    for node_id, prereq_id in edges:
+        prereqs_by_concept[node_id].append(prereq_id)
+        prereq_ids.add(prereq_id)
+    prereq_nodes = {n.id: n for n in db.scalars(
+        select(models.KnowledgeNode).where(models.KnowledgeNode.id.in_(prereq_ids))).all()}
+    # prereq mastery: concept prereqs via one batched state read; topic prereqs via topic_mastery.
+    cp_states = concept_states_batch(
+        db, learner_id, [n for n in prereq_nodes.values()
+                         if n.kind == models.NodeKind.concept.value], now)
+    tmastery = {n.id: topic_mastery(db, learner_id, n, now)
+                for n in prereq_nodes.values() if n.kind == models.NodeKind.topic.value}
+
+    def _mastered(pid: str) -> bool:
+        n = prereq_nodes.get(pid)
+        if n is None:
+            return True  # dangling prereq — the per-concept version skipped it (didn't lock)
+        if n.kind == models.NodeKind.concept.value:
+            return (cp_states[pid].mastery if pid in cp_states else 1.0) >= engine.H
+        return tmastery.get(pid, 0.0) >= engine.H
+
+    return {cid: any(not _mastered(pid) for pid in prereqs_by_concept.get(cid, [])) for cid in ids}
+
+
 def within_topic_candidates(db: Session, learner_id: uuid.UUID, topic: models.KnowledgeNode,
                             now: datetime | None = None, exclude_concept_ids=frozenset()):
     """All actionable concepts in a topic, in priority order: first the unlearned-and-unlocked ones
@@ -346,16 +385,16 @@ def within_topic_candidates(db: Session, learner_id: uuid.UUID, topic: models.Kn
     with no servable items, locked concepts, and excluded concepts are dropped. Returns a list of
     (concept_node, mode)."""
     now = now or engine.now_utc()
-    concepts = [c for c in _concepts_of_topic(db, topic.id)
-                if _concept_has_items(db, c.id) and c.id not in exclude_concept_ids
-                and not is_practice_bank(c)]
-    states = {c.id: concept_state(db, learner_id, c, now) for c in concepts}
+    all_concepts = [c for c in _concepts_of_topic(db, topic.id) if not is_practice_bank(c)]
+    have_items = concepts_with_items(db, [c.id for c in all_concepts])
+    concepts = [c for c in all_concepts if c.id in have_items and c.id not in exclude_concept_ids]
+    states = concept_states_batch(db, learner_id, concepts, now)
+    locked = _concepts_locked_batch(db, learner_id, concepts, now)
 
-    learn = [c for c in concepts
-             if not states[c.id].learned and not is_concept_locked(db, learner_id, c, now)]
+    learn = [c for c in concepts if not states[c.id].learned and not locked.get(c.id)]
     revise = [c for c in concepts
               if states[c.id].learned and not states[c.id].mastered
-              and not is_concept_locked(db, learner_id, c, now) and c not in learn]
+              and not locked.get(c.id) and c not in learn]
     revise.sort(key=lambda c: states[c.id].mastery)
     return [(c, "learn") for c in learn] + [(c, "revise") for c in revise]
 
