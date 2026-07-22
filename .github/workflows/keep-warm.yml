@@ -1,0 +1,33 @@
+name: Keep backend warm
+
+# The Render free tier spins the service down after ~15 min idle, so the next visitor eats a
+# 1-2s+ cold start. This pings the public /health endpoint on a timer to keep the container awake.
+# /health does NO database work, so the request is cheap. GitHub's scheduler can lag a few minutes
+# under load, so we ping every 10 min to stay comfortably under the 15-min spin-down window.
+#
+# Cost note: Actions minutes are FREE + unlimited for PUBLIC repos. If this repo is PRIVATE, each
+# run bills ~1 minute against the account's Actions quota (~4300 min/month at this cadence) — in
+# that case prefer a free external monitor (UptimeRobot / cron-job.org) and delete this file.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes (UTC)
+  workflow_dispatch: {}        # allow a manual run from the Actions tab
+
+# If a run is still going when the next fires, skip the new one instead of piling up.
+concurrency:
+  group: keep-warm
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping /health
+        run: |
+          # -f: fail on HTTP >=400; generous --max-time so a cold wake-up still counts; retry a few
+          # times so a transient blip / mid-cold-start doesn't mark the run red.
+          curl -fsS --max-time 120 --retry 4 --retry-delay 20 --retry-all-errors \
+            "https://vettalume-backend.onrender.com/health"
+          echo "" && echo "backend is warm"
