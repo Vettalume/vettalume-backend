@@ -118,25 +118,32 @@ def practice_next(db: Session, learner: models.Account, topic: models.KnowledgeN
     that appears is one the learner is ready to learn from. Progress is counted in mastered subtopics.
     """
     now = now or engine.now_utc()
-    # the chapter's per-subtopic practice pools that actually hold questions
-    pools = [c for c in kg._concepts_of_topic(db, topic.id)
-             if kg.is_practice_bank(c) and kg._concept_has_items(db, c.id)]
+    # the chapter's per-subtopic practice pools that actually hold questions — one query for
+    # "which candidates have items" instead of a _concept_has_items() call per candidate.
+    candidates = [c for c in kg._concepts_of_topic(db, topic.id) if kg.is_practice_bank(c)]
+    have_items = kg.concepts_with_items(db, [c.id for c in candidates])
+    pools = [c for c in candidates if c.id in have_items]
     total = len(pools)
     if not pools:
         return {"status": "empty", "subtopics_total": 0, "subtopics_mastered": 0,
                 "chapter": {"id": topic.id, "name": topic.name},
                 "message": "No practice questions have been added for this chapter's subtopics yet."}
 
+    pool_ids = [p.id for p in pools]
     # hardest difficulty available in each pool — mastery must climb to (near) it, so easy-only
     # streaks can't finish a subtopic; the learner has to conquer its hard questions.
     max_d = dict(db.execute(
         select(models.Item.concept_node_id, func.max(models.Item.difficulty_d))
-        .where(models.Item.concept_node_id.in_([p.id for p in pools]))
+        .where(models.Item.concept_node_id.in_(pool_ids))
         .group_by(models.Item.concept_node_id)).all())
 
-    # per pool: blended mastery, MAPLE edge (easy-start ladder), and whether it's "done"
-    st = {p.id: kg.concept_state(db, learner.id, p, now) for p in pools}
-    edge = {p.id: engine.maple_edge(kg.concept_attempts(db, learner.id, p.id), start=engine.MAPLE_MIN)
+    # per pool: blended mastery + MAPLE edge (easy-start ladder). Fetch attempts + item counts ONCE
+    # (batched) and derive both here, instead of concept_state + a second concept_attempts per pool.
+    attempts_map = kg.concept_attempts_batch(db, learner.id, pool_ids)
+    counts_map = kg.concept_item_counts_batch(db, pool_ids)
+    st = {p.id: kg._build_concept_state(p, attempts_map.get(p.id, []), counts_map.get(p.id, 0), now)
+          for p in pools}
+    edge = {p.id: engine.maple_edge(attempts_map.get(p.id, []), start=engine.MAPLE_MIN)
             for p in pools}
 
     def done(p):

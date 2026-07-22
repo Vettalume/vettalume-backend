@@ -67,7 +67,7 @@ def chapter_analysis(db: Session, learner: models.Account, topic: models.Knowled
     total_correct = sum(1 for r, _ in responses if r.correct)
 
     # ---- per-concept live state (mastery / learned / edge) ----
-    cstates = {c.id: kg.concept_state(db, learner.id, c, now) for c in concepts}
+    cstates = kg.concept_states_batch(db, learner.id, concepts, now)  # 2 queries, was 2 per concept
     topic_mastery = kg.topic_mastery(db, learner.id, topic, now)
     # "Topics learnt" = subtopics whose MAB mastery has crossed the learnt bar (70%).
     learnt = sum(1 for c in display_concepts if cstates[c.id].mastery >= LEARNT_THRESHOLD)

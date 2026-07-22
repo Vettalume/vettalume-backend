@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import models
@@ -77,14 +77,57 @@ def concept_attempts(db: Session, learner_id: uuid.UUID, node_id: str) -> list[A
                     ts=engine.as_utc(r.created_at)) for r in rows]
 
 
-def concept_state(db: Session, learner_id: uuid.UUID, node: models.KnowledgeNode,
-                  now: datetime | None = None) -> ConceptState:
-    now = now or engine.now_utc()
-    attempts = concept_attempts(db, learner_id, node.id)
+def concept_attempts_batch(db: Session, learner_id: uuid.UUID,
+                           node_ids) -> dict[str, list[Attempt]]:
+    """concept_attempts for MANY concepts in ONE query (avoids the per-concept N+1 in the loops).
+    Returns {node_id -> attempts in created_at-ascending order}, identical to concept_attempts."""
+    ids = [i for i in node_ids]
+    if not ids:
+        return {}
+    rows = db.execute(
+        select(models.Item.concept_node_id, models.Response.correct,
+               models.Response.difficulty_d, models.Response.created_at)
+        .join(models.Item, models.Item.item_id == models.Response.item_id)
+        .where(models.Response.learner_id == learner_id,
+               models.Item.concept_node_id.in_(ids),
+               models.Response.context == models.Context.practice.value)
+        .order_by(models.Response.created_at.asc())
+    ).all()
+    out: dict[str, list[Attempt]] = {}
+    for cnid, correct, diff, ts in rows:
+        out.setdefault(cnid, []).append(
+            Attempt(correct=1 if correct else 0, difficulty=diff, ts=engine.as_utc(ts)))
+    return out
+
+
+def concept_item_counts_batch(db: Session, node_ids) -> dict[str, int]:
+    """Servable-item count per concept in ONE query (respects the approved-only rule)."""
+    ids = [i for i in node_ids]
+    if not ids:
+        return {}
+    q = _approved_clause(select(models.Item.concept_node_id, func.count())
+                         .where(models.Item.concept_node_id.in_(ids)))
+    return dict(db.execute(q.group_by(models.Item.concept_node_id)).all())
+
+
+def concepts_with_items(db: Session, node_ids) -> set[str]:
+    """The subset of concepts that have >=1 servable item — batched replacement for calling
+    _concept_has_items() once per concept."""
+    ids = [i for i in node_ids]
+    if not ids:
+        return set()
+    q = _approved_clause(select(models.Item.concept_node_id)
+                         .where(models.Item.concept_node_id.in_(ids))).distinct()
+    return set(db.scalars(q).all())
+
+
+def _build_concept_state(node: models.KnowledgeNode, attempts: list[Attempt],
+                         n_items: int, now: datetime) -> ConceptState:
+    """Pure state computation from already-fetched attempts + item count (no DB access), so it can
+    be driven by either the per-concept path or the batched path with identical results."""
     mastery, p, d, m = engine.blended_mastery(attempts, now)
     edge = engine.maple_edge(attempts)
     # require evidence across up to MASTERY_MIN_ATTEMPTS items, but never more than the concept has
-    n_items = _concept_item_count(db, node.id)
     eff_min = max(1, min(engine.MASTERY_MIN_ATTEMPTS, n_items)) if n_items else engine.MASTERY_MIN_ATTEMPTS
     return ConceptState(
         node_id=node.id, name=node.name, mastery=mastery, p=p, d=d, m=m, edge=edge,
@@ -92,6 +135,25 @@ def concept_state(db: Session, learner_id: uuid.UUID, node: models.KnowledgeNode
         learned=len(attempts) >= 1, mastered=engine.concept_mastered(mastery, len(attempts), eff_min),
         due_for_review=engine.is_due_for_review(mastery, m),
     )
+
+
+def concept_state(db: Session, learner_id: uuid.UUID, node: models.KnowledgeNode,
+                  now: datetime | None = None) -> ConceptState:
+    now = now or engine.now_utc()
+    return _build_concept_state(node, concept_attempts(db, learner_id, node.id),
+                                _concept_item_count(db, node.id), now)
+
+
+def concept_states_batch(db: Session, learner_id: uuid.UUID, nodes,
+                         now: datetime | None = None) -> dict[str, ConceptState]:
+    """concept_state for a whole list of concepts in 2 queries total (attempts + counts) instead of
+    2 per concept. Returns {node_id -> ConceptState}."""
+    now = now or engine.now_utc()
+    ids = [n.id for n in nodes]
+    attempts_map = concept_attempts_batch(db, learner_id, ids)
+    counts_map = concept_item_counts_batch(db, ids)
+    return {n.id: _build_concept_state(n, attempts_map.get(n.id, []), counts_map.get(n.id, 0), now)
+            for n in nodes}
 
 
 # ---------- structure ----------
@@ -134,7 +196,8 @@ def topic_mastery(db: Session, learner_id: uuid.UUID, topic: models.KnowledgeNod
     if not concepts:
         return 0.0
     now = now or engine.now_utc()
-    return sum(concept_state(db, learner_id, c, now).mastery for c in concepts) / len(concepts)
+    states = concept_states_batch(db, learner_id, concepts, now)
+    return sum(states[c.id].mastery for c in concepts) / len(concepts)
 
 
 def is_topic_locked(db: Session, learner_id: uuid.UUID, topic: models.KnowledgeNode,
@@ -155,7 +218,9 @@ def is_topic_locked(db: Session, learner_id: uuid.UUID, topic: models.KnowledgeN
 def topic_view(db: Session, learner_id: uuid.UUID, topic: models.KnowledgeNode,
                now: datetime | None = None) -> TopicView:
     now = now or engine.now_utc()
-    concepts = [concept_state(db, learner_id, c, now) for c in _concepts_of_topic(db, topic.id)]
+    concept_nodes = _concepts_of_topic(db, topic.id)
+    states = concept_states_batch(db, learner_id, concept_nodes, now)
+    concepts = [states[c.id] for c in concept_nodes]
     mastery = sum(c.mastery for c in concepts) / len(concepts) if concepts else 0.0
     return TopicView(
         node_id=topic.id, name=topic.name, section_key=_section_key_of(db, topic),

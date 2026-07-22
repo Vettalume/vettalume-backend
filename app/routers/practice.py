@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import models
@@ -85,10 +85,17 @@ def get_state(exam: str, learner=Depends(get_current_learner), db: Session = Dep
     states = {s.node_id: s for s in db.scalars(
         select(models.LearnerNodeState).where(models.LearnerNodeState.learner_id == learner.id)).all()}
 
+    # attempts-per-node in ONE grouped query (was a node_attempt_count() call per node = N round-trips)
+    counts = dict(db.execute(
+        select(models.Item.concept_node_id, func.count())
+        .join(models.Response, models.Response.item_id == models.Item.item_id)
+        .where(models.Response.learner_id == learner.id)
+        .group_by(models.Item.concept_node_id)).all())
+
     out: list[NodeStateOut] = []
     for n in nodes:
         st = states.get(n.id)
-        attempts = node_attempt_count(db, learner.id, n.id) if st else 0
+        attempts = counts.get(n.id, 0) if st else 0
         out.append(NodeStateOut(
             node_id=n.id, name=n.name,
             learned=bool(st.learned) if st else False,

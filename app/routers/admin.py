@@ -347,12 +347,16 @@ def list_items(exam: Optional[str] = None, section: Optional[str] = None,
         q = q.where(models.Item.concept_node_id == concept)
     if status:
         q = q.where(models.Item.status == status)
+    if section:
+        # filter by section IN SQL (was: load every Section, then discard non-matching items in Python)
+        sec_q = select(models.Section.id).where(models.Section.key == section)
+        if exam:
+            sec_q = sec_q.where(models.Section.exam_code == exam)
+        q = q.where(models.Item.section_id.in_(list(db.scalars(sec_q).all())))
     items = db.scalars(q.limit(limit)).all()
     sec_key = {s.id: s.key for s in db.scalars(select(models.Section)).all()}
     out = []
     for it in items:
-        if section and sec_key.get(it.section_id) != section:
-            continue
         out.append({
             "item_id": it.item_id, "version": it.version, "exam_code": it.exam_code,
             "section": sec_key.get(it.section_id), "concept_node_id": it.concept_node_id,
